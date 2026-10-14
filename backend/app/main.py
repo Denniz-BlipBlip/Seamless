@@ -19,6 +19,7 @@ from .account_store import (
 from .google_auth import GoogleAuthError, verify_google_id_token
 from .appearance_analysis import AppearanceAnalysisError, AppearanceAnalyzer
 from .body_scan import BodyScanError, BodyScanEstimator
+from .body_profile import BodyProfileError, BodyProfileEstimator, BodyProfileRequest
 from .news_feed import FashionNewsService
 from .schemas import (
     AccountAuthResponse,
@@ -75,6 +76,7 @@ app.add_middleware(
 
 engine = SeamlyEngine()
 body_scan_estimator = BodyScanEstimator()
+body_profile_estimator = BodyProfileEstimator()
 appearance_analyzer = AppearanceAnalyzer()
 fashion_news_service = FashionNewsService()
 weather_style_service = WeatherStyleService()
@@ -264,6 +266,15 @@ def analyze_body_scan(request: BodyScanRequest) -> BodyScanResponse:
     try:
         return body_scan_estimator.analyze(request)
     except BodyScanError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
+
+
+@app.post("/v1/body-scan/profile", response_model=BodyScanResponse)
+def body_scan_profile(request: BodyProfileRequest) -> BodyScanResponse:
+    """Guided front/side/back scan: widths and depths measured on the phone."""
+    try:
+        return body_profile_estimator.estimate(request)
+    except BodyProfileError as error:
         raise HTTPException(status_code=422, detail=str(error)) from error
 
 

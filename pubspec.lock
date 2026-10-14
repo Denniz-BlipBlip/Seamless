@@ -208,6 +208,14 @@ packages:
       url: "https://pub.dev"
     source: hosted
     version: "0.13.0"
+  google_mlkit_pose_detection:
+    dependency: "direct main"
+    description:
+      name: google_mlkit_pose_detection
+      sha256: "8396397b6801714e53b3433053df4db5ec4f2bd5b7f75db6b9abd47e6eeebd07"
+      url: "https://pub.dev"
+    source: hosted
+    version: "0.16.1"
   google_mlkit_selfie_segmentation:
     dependency: "direct main"
     description:
