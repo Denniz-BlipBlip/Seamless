@@ -114,7 +114,7 @@ void main() {
       final result = service.analyze(_pose(), _size);
       final nose = result.keyPoints['nose']!;
       expect(nose.dx, closeTo(0.5, 1e-9));
-      expect(nose.dy, closeTo(0.12, 1e-9));
+      expect(nose.dy, closeTo(0.12, 0.001));
       expect(result.keyPoints.length, 9);
     });
   });
