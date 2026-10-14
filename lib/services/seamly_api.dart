@@ -117,28 +117,6 @@ class SeamlyApi {
     });
   }
 
-  // Old single-photo scan endpoints. The new guided scan no longer calls
-  // them; they go away with the backend endpoints in Step 6.
-  Future<Map<String, dynamic>> previewBodyPhoto({
-    required Uint8List imageBytes,
-  }) {
-    return _post('/v1/body-scan/preview', {
-      'image_base64': base64Encode(imageBytes),
-      'consent_confirmed': true,
-    }, timeout: const Duration(seconds: 20));
-  }
-
-  Future<Map<String, dynamic>> analyzeBodyPhoto({
-    required Uint8List imageBytes,
-    required double referenceHeightCm,
-  }) {
-    return _post('/v1/body-scan/analyze', {
-      'image_base64': base64Encode(imageBytes),
-      'reference_height_cm': referenceHeightCm,
-      'consent_confirmed': true,
-    }, timeout: const Duration(seconds: 90));
-  }
-
   /// Guided scan: sends only the widths and depths measured on the phone
   /// (the output of `BodyProfile.toJson()`), never a photo.
   Future<Map<String, dynamic>> analyzeBodyProfile(
