@@ -75,13 +75,21 @@ class BodyProfile {
 /// Turns the three scan photos plus pose points into body widths and depths.
 /// Runs on the phone; only the resulting numbers go to the backend.
 class BodyProfileExtractor {
-  BodyProfileExtractor({SelfieSegmenter? segmenter})
-    : _segmenter =
-          segmenter ?? SelfieSegmenter(mode: SegmenterMode.single);
+  /// [silhouetteLoader] replaces the on-device segmentation step. Tests use it
+  /// to hand in synthetic silhouettes; the real app leaves it null.
+  BodyProfileExtractor({
+    SelfieSegmenter? segmenter,
+    Future<BodySilhouette> Function(Uint8List jpeg)? silhouetteLoader,
+  }) : _segmenter = segmenter,
+       _loader = silhouetteLoader;
 
-  final SelfieSegmenter _segmenter;
+  /// Created on first use, so building an extractor never touches ML Kit.
+  SelfieSegmenter? _segmenter;
+  final Future<BodySilhouette> Function(Uint8List jpeg)? _loader;
 
-  Future<void> dispose() => _segmenter.close();
+  Future<void> dispose() async {
+    await _segmenter?.close();
+  }
 
   Future<BodyProfile> extract({
     required Map<ScanAngle, ScanShot> shots,
@@ -208,7 +216,12 @@ class BodyProfileExtractor {
     );
   }
 
-  Future<_Silhouette> _silhouette(Uint8List jpeg) async {
+  Future<BodySilhouette> _silhouette(Uint8List jpeg) {
+    final loader = _loader;
+    return loader != null ? loader(jpeg) : _segmentOnDevice(jpeg);
+  }
+
+  Future<BodySilhouette> _segmentOnDevice(Uint8List jpeg) async {
     final prepared = await Isolate.run(() => _prepare(jpeg));
     if (prepared == null) {
       throw const ScanExtractionException('A photo could not be read.');
@@ -217,7 +230,10 @@ class BodyProfileExtractor {
     try {
       final path = '${directory.path}/shot.jpg';
       await File(path).writeAsBytes(prepared.bytes, flush: true);
-      final mask = await _segmenter.processImage(InputImage.fromFilePath(path));
+      final segmenter = _segmenter ??= SelfieSegmenter(
+        mode: SegmenterMode.single,
+      );
+      final mask = await segmenter.processImage(InputImage.fromFilePath(path));
       if (mask == null ||
           mask.width <= 0 ||
           mask.height <= 0 ||
@@ -230,7 +246,7 @@ class BodyProfileExtractor {
       for (var i = 0; i < foreground.length; i++) {
         foreground[i] = mask.confidences[i] >= 0.5 ? 1 : 0;
       }
-      return _Silhouette(
+      return BodySilhouette(
         foreground,
         mask.width,
         mask.height,
@@ -247,7 +263,7 @@ class BodyProfileExtractor {
 
   /// Top and bottom of the body (0..1), judged near the body centre so stray
   /// background objects do not stretch the height.
-  (double, double)? _verticalExtent(_Silhouette sil, double centerX) {
+  (double, double)? _verticalExtent(BodySilhouette sil, double centerX) {
     final from = ((centerX - 0.2) * sil.w).floor().clamp(0, sil.w - 1);
     final to = ((centerX + 0.2) * sil.w).ceil().clamp(1, sil.w);
     int? top, bottom;
@@ -267,7 +283,7 @@ class BodyProfileExtractor {
 
   /// Width (0..1 of image width) of the body run that contains the centre
   /// line, taken as the median over a thin band of rows.
-  double? _runWidth(_Silhouette sil, double yNorm, double centerNorm) {
+  double? _runWidth(BodySilhouette sil, double yNorm, double centerNorm) {
     final centerRow = (yNorm * sil.h).round();
     final band = math.max(1, (BodyLevels.bandHalfHeight * sil.h).round());
     final widths = <double>[];
@@ -297,7 +313,7 @@ class BodyProfileExtractor {
   }
 
   /// Walk outwards while pixels are body, tolerating a one-pixel gap.
-  int _edge(_Silhouette sil, int start, int step, int y) {
+  int _edge(BodySilhouette sil, int start, int step, int y) {
     var edge = start;
     var gap = 0;
     var i = start + step;
@@ -326,8 +342,10 @@ class _ShotMeasure {
   final double hipToAnkleCm;
 }
 
-class _Silhouette {
-  const _Silhouette(this.fg, this.w, this.h, this.aspect);
+/// A person mask: [fg] holds one byte per pixel (1 = body), row by row.
+/// Public so tests can build synthetic silhouettes.
+class BodySilhouette {
+  const BodySilhouette(this.fg, this.w, this.h, this.aspect);
 
   final Uint8List fg;
   final int w;
