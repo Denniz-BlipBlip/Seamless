@@ -18,7 +18,6 @@ from .account_store import (
 )
 from .google_auth import GoogleAuthError, verify_google_id_token
 from .appearance_analysis import AppearanceAnalysisError, AppearanceAnalyzer
-from .body_scan import BodyScanError, BodyScanEstimator
 from .body_profile import BodyProfileError, BodyProfileEstimator, BodyProfileRequest
 from .news_feed import FashionNewsService
 from .schemas import (
@@ -28,9 +27,6 @@ from .schemas import (
     AccountProfile,
     AccountProfileUpdateRequest,
     AccountRegisterRequest,
-    BodyScanPreviewRequest,
-    BodyScanPreviewResponse,
-    BodyScanRequest,
     BodyScanResponse,
     AppearanceAnalysisRequest,
     AppearanceAnalysisResponse,
@@ -75,7 +71,6 @@ app.add_middleware(
 )
 
 engine = SeamlyEngine()
-body_scan_estimator = BodyScanEstimator()
 body_profile_estimator = BodyProfileEstimator()
 appearance_analyzer = AppearanceAnalyzer()
 fashion_news_service = FashionNewsService()
@@ -254,19 +249,6 @@ async def home_weather(
 @app.post("/v1/size/recommend", response_model=SizeResponse)
 def recommend_size(request: SizeRequest) -> SizeResponse:
     return engine.recommend_size(request)
-
-
-@app.post("/v1/body-scan/preview", response_model=BodyScanPreviewResponse)
-def preview_body_scan(request: BodyScanPreviewRequest) -> BodyScanPreviewResponse:
-    return body_scan_estimator.preview(request)
-
-
-@app.post("/v1/body-scan/analyze", response_model=BodyScanResponse)
-def analyze_body_scan(request: BodyScanRequest) -> BodyScanResponse:
-    try:
-        return body_scan_estimator.analyze(request)
-    except BodyScanError as error:
-        raise HTTPException(status_code=422, detail=str(error)) from error
 
 
 @app.post("/v1/body-scan/profile", response_model=BodyScanResponse)

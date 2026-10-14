@@ -122,39 +122,6 @@ class SizeResponse(BaseModel):
     disclaimer: str
 
 
-class BodyScanRequest(BaseModel):
-    image_base64: str = Field(min_length=32, max_length=18_000_000)
-    reference_height_cm: float = Field(ge=120, le=230)
-    consent_confirmed: bool
-
-    @field_validator("consent_confirmed")
-    @classmethod
-    def require_consent(cls, value: bool) -> bool:
-        if not value:
-            raise ValueError("Photo analysis requires explicit consent")
-        return value
-
-
-class BodyScanPreviewRequest(BaseModel):
-    image_base64: str = Field(min_length=32, max_length=18_000_000)
-    consent_confirmed: bool
-
-    @field_validator("consent_confirmed")
-    @classmethod
-    def require_consent(cls, value: bool) -> bool:
-        if not value:
-            raise ValueError("Photo analysis requires explicit consent")
-        return value
-
-
-class BodyScanPreviewResponse(BaseModel):
-    ready: bool
-    person_detected: bool
-    person_confidence: float = Field(ge=0, le=1)
-    guidance: str
-    bbox: list[float] | None = None
-
-
 class BodyScanResponse(BaseModel):
     person_detected: bool
     person_confidence: float = Field(ge=0, le=1)
