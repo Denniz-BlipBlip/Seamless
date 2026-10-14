@@ -137,6 +137,17 @@ class SeamlyApi {
     }, timeout: const Duration(seconds: 90));
   }
 
+  /// Selfie color scan: sends only colors sampled on the phone over several
+  /// frames (see `SelfieSample.toJson`), never a photo.
+  Future<Map<String, dynamic>> analyzeColorFrames(
+    List<Map<String, dynamic>> frames,
+  ) {
+    return _post('/v1/profile/analyze-frames', {
+      'frames': frames,
+      'consent_confirmed': true,
+    }, timeout: const Duration(seconds: 30));
+  }
+
   Future<Map<String, dynamic>> fetchFashionNews({
     required String category,
     int limit = 16,
