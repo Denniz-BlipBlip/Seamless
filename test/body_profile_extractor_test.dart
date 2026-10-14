@@ -1,5 +1,4 @@
 import 'dart:typed_data';
-import 'dart:ui' show Offset;
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:seamly/features/guided_scan_screen.dart' show ScanShot;

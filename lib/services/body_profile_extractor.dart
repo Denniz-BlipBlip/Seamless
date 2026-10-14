@@ -1,3 +1,4 @@
+// ignore_for_file: prefer_initializing_formals
 import 'dart:io';
 import 'dart:isolate';
 import 'dart:math' as math;
