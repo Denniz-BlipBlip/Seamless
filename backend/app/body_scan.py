@@ -1,4 +1,4 @@
-"""Shared measurement names and limits for the guided body scan."""
+"""Measurement names and plausible limits shared by the body-profile estimator."""
 
 from __future__ import annotations
 
