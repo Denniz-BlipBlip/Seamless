@@ -1,15 +1,21 @@
 import 'dart:async';
 import 'dart:typed_data';
 
-import 'package:camera/camera.dart' as camera;
 import 'package:flutter/material.dart';
-import 'package:image_picker/image_picker.dart' as picker;
 
+import '../services/body_profile_extractor.dart';
+import '../services/pose_scan_service.dart' show ScanAngle;
 import '../services/seamly_api.dart';
-import '../services/person_segmentation.dart';
 import '../theme/seamly_theme.dart';
 import '../widgets/common.dart';
-import 'camera_capture_view.dart';
+import 'guided_scan_screen.dart';
+
+/// Builds the camera step. Tests replace it so no real camera is needed.
+typedef ScanViewBuilder =
+    Widget Function(
+      ValueChanged<Map<ScanAngle, ScanShot>> onCompleted,
+      VoidCallback onCancel,
+    );
 
 class CameraMeasurementScreen extends StatefulWidget {
   const CameraMeasurementScreen({
@@ -23,7 +29,8 @@ class CameraMeasurementScreen extends StatefulWidget {
     required this.onOpenShop,
     this.onOpenAccount,
     this.avatarBase64,
-    this.segmenter,
+    this.extractor,
+    this.scanBuilder,
   });
 
   final SeamlyApi api;
@@ -35,258 +42,69 @@ class CameraMeasurementScreen extends StatefulWidget {
   final VoidCallback onOpenShop;
   final VoidCallback? onOpenAccount;
   final String? avatarBase64;
-  final PersonSegmentation? segmenter;
+
+  /// Measures the three photos on the phone. Defaults to the real one.
+  final BodyProfileExtractor? extractor;
+
+  /// Replaces the guided camera screen (for tests).
+  final ScanViewBuilder? scanBuilder;
 
   @override
   State<CameraMeasurementScreen> createState() =>
       _CameraMeasurementScreenState();
 }
 
-class _CameraMeasurementScreenState extends State<CameraMeasurementScreen>
-    with WidgetsBindingObserver {
-  final _picker = picker.ImagePicker();
-  late final PersonSegmentation _segmenter =
-      widget.segmenter ?? PersonSegmentation();
+enum _ScanStage { prepare, scanning, review }
 
-  camera.CameraController? _cameraController;
-  List<camera.CameraDescription> _cameras = const [];
-  Uint8List? _photoBytes;
+class _CameraMeasurementScreenState extends State<CameraMeasurementScreen> {
+  BodyProfileExtractor? _ownedExtractor;
+  _ScanStage _stage = _ScanStage.prepare;
+  Uint8List? _frontPhoto;
   Map<String, dynamic>? _result;
   Map<String, dynamic>? _colorResult;
   String? _error;
   String? _colorError;
-  bool _cameraStarting = false;
   bool _analyzing = false;
   bool _analyzingColor = false;
-  bool _instructionsAccepted = false;
   bool _preparationConfirmed = false;
   bool _consentConfirmed = false;
-  bool _capturing = false;
-  int _cameraGeneration = 0;
   int _scanGeneration = 0;
-  Future<void> _cameraQueue = Future<void>.value();
-  Timer? _previewTimer;
-  bool _previewInFlight = false;
-  bool _previewReady = false;
-  String? _previewGuidance;
-  List<double>? _previewBbox;
-  int _consecutiveScanFailures = 0;
 
-  bool get _busy => _capturing || _analyzing || _analyzingColor;
+  bool get _busy => _analyzing || _analyzingColor;
   bool _currentScan(int generation) =>
       mounted && widget.active && generation == _scanGeneration;
 
-  @override
-  void initState() {
-    super.initState();
-    WidgetsBinding.instance.addObserver(this);
-  }
+  BodyProfileExtractor _extractor() =>
+      widget.extractor ?? (_ownedExtractor ??= BodyProfileExtractor());
 
   @override
   void didUpdateWidget(covariant CameraMeasurementScreen oldWidget) {
     super.didUpdateWidget(oldWidget);
-    if (widget.active &&
-        !oldWidget.active &&
-        _instructionsAccepted &&
-        _photoBytes == null &&
-        !_capturing) {
-      _startCamera();
-    } else if (!widget.active && oldWidget.active) {
+    if (!widget.active && oldWidget.active) {
+      // Leaving the tab: drop any scan in progress and start fresh next time.
       _scanGeneration++;
-      _capturing = false;
-      _analyzing = false;
-      _analyzingColor = false;
-      _stopPreviewLoop();
-      unawaited(_disposeCamera());
-      _instructionsAccepted = false;
+      _stage = _ScanStage.prepare;
+      _clearOutcome();
       _preparationConfirmed = false;
       _consentConfirmed = false;
-      _photoBytes = null;
-      _result = null;
-      _colorResult = null;
-      _error = null;
-      _colorError = null;
-      _consecutiveScanFailures = 0;
-      _previewReady = false;
-      _previewGuidance = null;
-      _previewBbox = null;
-    } else if (widget.active && _instructionsAccepted && _photoBytes == null) {
-      _startPreviewLoop();
-    }
-  }
-
-  @override
-  void didChangeAppLifecycleState(AppLifecycleState state) {
-    if (!widget.active) return;
-if (state == AppLifecycleState.inactive) {
-      _stopPreviewLoop();
-      unawaited(_disposeCamera());
-} else if (state == AppLifecycleState.resumed &&
-        _instructionsAccepted &&
-        _photoBytes == null &&
-        !_capturing) {
-      unawaited(_startCamera());
     }
   }
 
   @override
   void dispose() {
-    WidgetsBinding.instance.removeObserver(this);
     _scanGeneration++;
-    _stopPreviewLoop();
-    unawaited(_disposeCamera());
-    unawaited(_segmenter.dispose());
+    unawaited(_ownedExtractor?.dispose());
     super.dispose();
   }
 
-  Future<void> _queueCameraOperation(Future<void> Function() operation) {
-    final next = _cameraQueue.then((_) => operation());
-    // A failed native operation must not prevent later cleanup or a retry.
-    _cameraQueue = next.catchError((Object _) {});
-    return next;
-  }
-
-  Future<void> _disposeCamera() {
-    _cameraGeneration++;
-    _cameraStarting = false;
-    final controller = _cameraController;
-    _cameraController = null;
-    return _queueCameraOperation(() async => controller?.dispose());
-  }
-
-  void _startPreviewLoop() {
-    if (_previewTimer != null || !mounted || !widget.active) return;
-    _previewTimer = Timer.periodic(
-      const Duration(milliseconds: 1500),
-      (_) => unawaited(_samplePreview()),
-    );
-    unawaited(_samplePreview());
-  }
-
-  void _stopPreviewLoop() {
-    _previewTimer?.cancel();
-    _previewTimer = null;
-    _previewInFlight = false;
-    _previewReady = false;
-    _previewGuidance = null;
-    _previewBbox = null;
-  }
-
-  Future<void> _samplePreview() async {
-    if (!mounted ||
-        !widget.active ||
-        !_instructionsAccepted ||
-        _photoBytes != null ||
-        _busy ||
-        _cameraStarting ||
-        _previewInFlight) {
-      return;
-    }
-    final controller = _cameraController;
-    if (controller == null || !controller.value.isInitialized) return;
-    final generation = _scanGeneration;
-    _previewInFlight = true;
-    try {
-      final file = await controller.takePicture();
-      final bytes = await file.readAsBytes();
-      if (!_currentScan(generation) || _photoBytes != null) return;
-      final result = await widget.api.previewBodyPhoto(imageBytes: bytes);
-      if (!_currentScan(generation) || _photoBytes != null) return;
-      final bbox = (result['bbox'] as List<dynamic>?)
-          ?.map((value) => (value as num).toDouble())
-          .toList();
-      setState(() {
-        _previewReady = result['ready'] == true;
-        _previewGuidance = result['guidance']?.toString();
-        _previewBbox = bbox;
-      });
-    } on Exception {
-      // Preview is best-effort; keep the last known state.
-    } finally {
-      _previewInFlight = false;
-      if (mounted &&
-          widget.active &&
-          _instructionsAccepted &&
-          _photoBytes == null &&
-          !_busy) {
-        _startPreviewLoop();
-      }
-    }
-  }
-
-  Future<void> _startCamera({camera.CameraLensDirection? lens}) {
-    final requestedGeneration = _cameraGeneration;
-    return _queueCameraOperation(() async {
-      if (requestedGeneration == _cameraGeneration) {
-        await _initializeCamera(lens: lens);
-      }
-    });
-  }
-
-  Future<void> _initializeCamera({camera.CameraLensDirection? lens}) async {
-    if (!mounted ||
-        !widget.active ||
-        !_instructionsAccepted ||
-        _photoBytes != null ||
-        _capturing ||
-        _cameraStarting ||
-        _cameraController?.value.isInitialized == true) {
-      return;
-    }
-    final generation = ++_cameraGeneration;
-    camera.CameraController? pending;
-    bool current() =>
-        mounted &&
-        widget.active &&
-        _instructionsAccepted &&
-        _photoBytes == null &&
-        generation == _cameraGeneration;
-    setState(() {
-      _cameraStarting = true;
-      _error = null;
-    });
-    try {
-      _cameras = await camera.availableCameras();
-      if (!current()) return;
-      if (_cameras.isEmpty) throw Exception('No camera found');
-      final selected = _cameras.firstWhere(
-        (item) =>
-            item.lensDirection == (lens ?? camera.CameraLensDirection.back),
-        orElse: () => _cameras.first,
-      );
-      pending = camera.CameraController(
-        selected,
-        camera.ResolutionPreset.high,
-        enableAudio: false,
-        imageFormatGroup: camera.ImageFormatGroup.jpeg,
-      );
-      await pending.initialize();
-      if (!current()) return;
-      final ready = pending;
-      pending = null;
-      setState(() => _cameraController = ready);
-      _startPreviewLoop();
-    } on Exception {
-      if (current()) {
-        setState(
-          () => _error =
-              'Allow camera access to take a photo, or choose one from your gallery.',
-        );
-      }
-    } finally {
-      await pending?.dispose();
-      if (current()) setState(() => _cameraStarting = false);
-    }
-  }
-
-  Future<void> _switchCamera() async {
-    if (_busy || _cameraStarting) return;
-    final current = _cameraController?.description.lensDirection;
-    final next = current == camera.CameraLensDirection.front
-        ? camera.CameraLensDirection.back
-        : camera.CameraLensDirection.front;
-    await _disposeCamera();
-    if (mounted && widget.active) await _startCamera(lens: next);
+  void _clearOutcome() {
+    _frontPhoto = null;
+    _result = null;
+    _colorResult = null;
+    _error = null;
+    _colorError = null;
+    _analyzing = false;
+    _analyzingColor = false;
   }
 
   bool get _hasValidCalibration {
@@ -294,31 +112,7 @@ if (state == AppLifecycleState.inactive) {
     return height != null && height >= 120 && height <= 230;
   }
 
-  bool _ensureCalibration() {
-    if (!_hasValidCalibration) {
-      setState(() {
-        _error =
-            'A verified height is missing from this account. Create or update your profile before scanning.';
-      });
-      return false;
-    }
-    if (!_instructionsAccepted || !_preparationConfirmed) {
-      setState(() {
-        _error =
-            'Review and confirm the scan instructions before taking a photo.';
-      });
-      return false;
-    }
-    if (!_consentConfirmed) {
-      setState(() {
-        _error = 'Photo consent is required before measurement analysis.';
-      });
-      return false;
-    }
-    return true;
-  }
-
-  Future<void> _beginGuidedScan() async {
+  void _beginScan() {
     if (!_hasValidCalibration) {
       setState(() {
         _error =
@@ -328,110 +122,60 @@ if (state == AppLifecycleState.inactive) {
     }
     if (!_preparationConfirmed || !_consentConfirmed) return;
     setState(() {
-      _instructionsAccepted = true;
-      _error = null;
+      _scanGeneration++;
+      _clearOutcome();
+      _stage = _ScanStage.scanning;
     });
-    await _startCamera();
+  }
+
+  void _cancelScan() {
+    if (!mounted) return;
+    setState(() {
+      _scanGeneration++;
+      _clearOutcome();
+      _stage = _ScanStage.prepare;
+    });
+  }
+
+  void _retake() {
+    if (_busy) return;
+    _beginScan();
   }
 
   void _reviewInstructions() {
-    _scanGeneration++;
-    _stopPreviewLoop();
-    unawaited(_disposeCamera());
+    if (_busy) return;
+    _cancelScan();
+  }
+
+  Future<void> _onScanCompleted(Map<ScanAngle, ScanShot> shots) async {
+    if (!mounted || !widget.active || _stage != _ScanStage.scanning) return;
+    final height = widget.referenceHeightCm;
+    if (height == null) return;
+    final generation = _scanGeneration;
+    final frontBytes = shots[ScanAngle.front]?.jpegBytes;
     setState(() {
-      _instructionsAccepted = false;
-      _error = null;
-    });
-  }
-
-  Future<void> _capture() async {
-    if (_busy || _cameraStarting || !_ensureCalibration()) return;
-    final controller = _cameraController;
-    if (controller == null || !controller.value.isInitialized) {
-      await _choosePhoto(picker.ImageSource.camera);
-      return;
-    }
-    final generation = _scanGeneration;
-    setState(() => _capturing = true);
-    try {
-      final file = await controller.takePicture();
-      final bytes = await file.readAsBytes();
-      if (_currentScan(generation)) await _usePhoto(bytes);
-    } on Exception {
-      if (_currentScan(generation)) {
-        setState(() => _error = 'The photo could not be captured. Try again.');
-      }
-    } finally {
-      if (_currentScan(generation)) {
-        setState(() => _capturing = false);
-        _startPreviewLoop();
-      }
-    }
-  }
-
-  Future<void> _choosePhoto(picker.ImageSource source) async {
-    if (_busy || !_ensureCalibration()) return;
-    final generation = _scanGeneration;
-    setState(() => _capturing = true);
-    try {
-      final file = await _picker.pickImage(
-        source: source,
-        maxWidth: 1800,
-        maxHeight: 2400,
-        imageQuality: 88,
-        requestFullMetadata: false,
-      );
-      if (file != null) {
-        final bytes = await file.readAsBytes();
-        if (_currentScan(generation)) await _usePhoto(bytes);
-      }
-    } on Exception {
-      if (_currentScan(generation)) {
-        setState(() => _error = 'The selected photo could not be opened.');
-      }
-    } finally {
-      if (_currentScan(generation)) {
-        setState(() => _capturing = false);
-        if (_photoBytes == null) await _startCamera();
-      }
-    }
-  }
-
-  Future<void> _usePhoto(Uint8List bytes) async {
-    if (!mounted || !widget.active) return;
-    final generation = _scanGeneration;
-    _stopPreviewLoop();
-    unawaited(_disposeCamera());
-    setState(() {
-      _photoBytes = bytes;
+      _stage = _ScanStage.review;
+      _frontPhoto = frontBytes;
       _result = null;
       _colorResult = null;
-      _analyzing = true;
-      _analyzingColor = false;
       _error = null;
       _colorError = null;
+      _analyzing = true;
+      _analyzingColor = false;
     });
     try {
-      // Clean the background on-device so the silhouette estimator sees a
-      // plain white backdrop. Falls back to the original photo when
-      // segmentation is unavailable; color analysis always uses it.
-      final scanBytes = await _segmenter.isolatePerson(bytes) ?? bytes;
-      if (!_currentScan(generation)) return;
-      final result = await widget.api.analyzeBodyPhoto(
-        imageBytes: scanBytes,
-        referenceHeightCm: widget.referenceHeightCm!,
+      // Measured on the phone: only numbers go to the server.
+      final profile = await _extractor().extract(
+        shots: shots,
+        heightCm: height,
       );
+      if (!_currentScan(generation)) return;
+      final result = await widget.api.analyzeBodyProfile(profile.toJson());
       if (!_currentScan(generation)) return;
       final measurements = (result['measurements'] as Map<String, dynamic>).map(
         (key, value) => MapEntry(key, (value as num).toDouble()),
       );
-      if (result['person_detected'] == false) {
-        throw const ApiException(
-          'No full-body person was detected. Retake the photo with one person visible from head to toe.',
-        );
-      }
       setState(() => _result = result);
-      _consecutiveScanFailures = 0;
       final confidence =
           (result['measurement_confidence'] as Map<String, dynamic>?) ??
           const <String, dynamic>{};
@@ -446,14 +190,15 @@ if (state == AppLifecycleState.inactive) {
       if (reliableFit) {
         widget.onMeasurementsReady(measurements);
       }
-      if (!_currentScan(generation)) return;
+      if (frontBytes == null || !_currentScan(generation)) return;
       setState(() {
         _analyzing = false;
         _analyzingColor = true;
       });
       try {
+        // Color analysis uses the front photo, as before.
         final colorResult = await widget.api.analyzeAppearancePhoto(
-          imageBytes: bytes,
+          imageBytes: frontBytes,
         );
         if (!_currentScan(generation)) return;
         setState(() => _colorResult = colorResult);
@@ -463,16 +208,18 @@ if (state == AppLifecycleState.inactive) {
           setState(() => _colorError = error.message);
         }
       }
+    } on ScanExtractionException catch (error) {
+      if (_currentScan(generation)) {
+        setState(() => _error = error.message);
+      }
     } on ApiException catch (error) {
       if (_currentScan(generation)) {
-        _consecutiveScanFailures++;
         setState(() => _error = error.message);
       }
     } on Exception {
       if (_currentScan(generation)) {
-        _consecutiveScanFailures++;
         setState(
-          () => _error = 'The photo could not be analyzed. Please try again.',
+          () => _error = 'The scan could not be analyzed. Please try again.',
         );
       }
     } finally {
@@ -483,21 +230,6 @@ if (state == AppLifecycleState.inactive) {
         });
       }
     }
-  }
-
-  Future<void> _retake() async {
-    if (_busy) return;
-    _scanGeneration++;
-    _stopPreviewLoop();
-    _consecutiveScanFailures = 0;
-    setState(() {
-      _photoBytes = null;
-      _result = null;
-      _colorResult = null;
-      _error = null;
-      _colorError = null;
-    });
-    await _startCamera();
   }
 
   void _showResults() {
@@ -537,14 +269,14 @@ if (state == AppLifecycleState.inactive) {
                         ),
                       ],
                     ),
-                    if (_photoBytes != null)
+                    if (_frontPhoto != null)
                       Padding(
                         padding: const EdgeInsets.symmetric(vertical: 12),
                         child: Image.memory(
-                          _photoBytes!,
+                          _frontPhoto!,
                           height: 200,
                           fit: BoxFit.contain,
-                          semanticLabel: 'Your full scan photo',
+                          semanticLabel: 'Your front scan photo',
                         ),
                       ),
                     if (_colorResult != null)
@@ -576,87 +308,207 @@ if (state == AppLifecycleState.inactive) {
     return PopScope(
       canPop: !widget.active,
       onPopInvokedWithResult: (didPop, _) {
-        if (!didPop && widget.active) widget.onBack();
+        if (didPop || !widget.active) return;
+        if (_stage == _ScanStage.scanning) {
+          _cancelScan();
+        } else {
+          widget.onBack();
+        }
       },
-      child: _instructionsAccepted
-          ? CameraCaptureView(
-              controller: _cameraController,
-              starting: _cameraStarting,
-              photoBytes: _photoBytes,
-              busy: _busy,
-              analyzingColor: _analyzingColor,
-              error: _error,
-              colorResult: _colorResult,
-              hasResults: _result != null || _colorResult != null,
-              previewReady: _previewReady,
-              previewGuidance: _previewGuidance,
-              previewBbox: _previewBbox,
-              showRetryTip: _consecutiveScanFailures >= 2,
-              onBack: widget.onBack,
-              onHelp: _reviewInstructions,
-              onCapture: _capture,
-              onRetake: _retake,
-              onGallery: () => _choosePhoto(picker.ImageSource.gallery),
-              onSwitch: _cameras.length > 1 ? _switchCamera : null,
-              onRetry: _startCamera,
-              onResults: _showResults,
-            )
-          : ColoredBox(
-              color: SeamlyColors.cream,
-              child: SafeArea(
-                child: SingleChildScrollView(
-                  padding: const EdgeInsets.fromLTRB(20, 12, 20, 24),
-                  child: Center(
-                    child: ConstrainedBox(
-                      constraints: const BoxConstraints(maxWidth: 560),
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.stretch,
-                        children: [
-                          Row(
-                            children: [
-                              IconButton(
-                                tooltip: 'Back home',
-                                onPressed: widget.onBack,
-                                icon: const Icon(Icons.arrow_back),
-                              ),
-                              const SizedBox(width: 8),
-                              const Expanded(
-                                child: Text(
-                                  'Body scan',
-                                  style: TextStyle(
-                                    fontSize: 22,
-                                    fontWeight: FontWeight.w700,
-                                  ),
-                                ),
-                              ),
-                            ],
-                          ),
-                          const SizedBox(height: 12),
-                          _ScanPreparationCard(
-                            referenceHeightCm: widget.referenceHeightCm,
-                            preparationConfirmed: _preparationConfirmed,
-                            consentConfirmed: _consentConfirmed,
-                            onPreparationChanged: (value) => setState(
-                              () => _preparationConfirmed = value ?? false,
-                            ),
-                            onConsentChanged: (value) => setState(
-                              () => _consentConfirmed = value ?? false,
-                            ),
-                            onStart: _preparationConfirmed && _consentConfirmed
-                                ? _beginGuidedScan
-                                : null,
-                          ),
-                          if (_error != null) ...[
-                            const SizedBox(height: 12),
-                            ErrorBanner(message: _error!),
-                          ],
-                        ],
+      child: switch (_stage) {
+        _ScanStage.prepare => _buildPrepare(),
+        _ScanStage.scanning =>
+          widget.scanBuilder?.call(_onScanCompleted, _cancelScan) ??
+              GuidedScanScreen(
+                key: ValueKey('guided-scan-$_scanGeneration'),
+                onCompleted: _onScanCompleted,
+                onCancel: _cancelScan,
+              ),
+        _ScanStage.review => _buildReview(),
+      },
+    );
+  }
+
+  Widget _buildPrepare() {
+    return ColoredBox(
+      color: SeamlyColors.cream,
+      child: SafeArea(
+        child: SingleChildScrollView(
+          padding: const EdgeInsets.fromLTRB(20, 12, 20, 24),
+          child: Center(
+            child: ConstrainedBox(
+              constraints: const BoxConstraints(maxWidth: 560),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  Row(
+                    children: [
+                      IconButton(
+                        tooltip: 'Back home',
+                        onPressed: widget.onBack,
+                        icon: const Icon(Icons.arrow_back),
                       ),
-                    ),
+                      const SizedBox(width: 8),
+                      const Expanded(
+                        child: Text(
+                          'Body scan',
+                          style: TextStyle(
+                            fontSize: 22,
+                            fontWeight: FontWeight.w700,
+                          ),
+                        ),
+                      ),
+                    ],
                   ),
-                ),
+                  const SizedBox(height: 12),
+                  _ScanPreparationCard(
+                    referenceHeightCm: widget.referenceHeightCm,
+                    preparationConfirmed: _preparationConfirmed,
+                    consentConfirmed: _consentConfirmed,
+                    onPreparationChanged: (value) =>
+                        setState(() => _preparationConfirmed = value ?? false),
+                    onConsentChanged: (value) =>
+                        setState(() => _consentConfirmed = value ?? false),
+                    onStart: _preparationConfirmed && _consentConfirmed
+                        ? _beginScan
+                        : null,
+                  ),
+                  if (_error != null) ...[
+                    const SizedBox(height: 12),
+                    ErrorBanner(message: _error!),
+                  ],
+                ],
               ),
             ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildReview() {
+    final hasOutcome = _result != null || _colorResult != null;
+    return ColoredBox(
+      color: SeamlyColors.cream,
+      child: SafeArea(
+        child: SingleChildScrollView(
+          padding: const EdgeInsets.fromLTRB(20, 12, 20, 24),
+          child: Center(
+            child: ConstrainedBox(
+              constraints: const BoxConstraints(maxWidth: 560),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  Row(
+                    children: [
+                      IconButton(
+                        tooltip: 'Back home',
+                        onPressed: widget.onBack,
+                        icon: const Icon(Icons.arrow_back),
+                      ),
+                      const SizedBox(width: 8),
+                      const Expanded(
+                        child: Text(
+                          'Body scan',
+                          style: TextStyle(
+                            fontSize: 22,
+                            fontWeight: FontWeight.w700,
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 12),
+                  if (_frontPhoto != null)
+                    ClipRRect(
+                      borderRadius: BorderRadius.circular(18),
+                      child: Image.memory(
+                        _frontPhoto!,
+                        width: double.infinity,
+                        height: 320,
+                        fit: BoxFit.cover,
+                        semanticLabel: 'Your front scan photo',
+                      ),
+                    ),
+                  const SizedBox(height: 16),
+                  if (_busy)
+                    _ScanProgressCard(
+                      message: _analyzingColor
+                          ? 'Reading your colors…'
+                          : 'Measuring your body from the photos…',
+                    ),
+                  if (_error != null) ErrorBanner(message: _error!),
+                  if (_colorError != null && !_busy) ...[
+                    const SizedBox(height: 12),
+                    _ColorAnalysisUnavailable(message: _colorError!),
+                  ],
+                  if (!_busy && hasOutcome) ...[
+                    const SizedBox(height: 16),
+                    FilledButton.icon(
+                      key: const ValueKey('camera-view-results'),
+                      onPressed: _showResults,
+                      icon: const Icon(Icons.keyboard_arrow_up),
+                      label: const Text('View results'),
+                      style: FilledButton.styleFrom(
+                        minimumSize: const Size.fromHeight(56),
+                      ),
+                    ),
+                  ],
+                  if (!_busy) ...[
+                    const SizedBox(height: 12),
+                    OutlinedButton.icon(
+                      key: const ValueKey('scan-again-button'),
+                      onPressed: _retake,
+                      icon: const Icon(Icons.refresh),
+                      label: const Text('Scan again'),
+                      style: OutlinedButton.styleFrom(
+                        minimumSize: const Size.fromHeight(52),
+                      ),
+                    ),
+                    TextButton(
+                      key: const ValueKey('review-instructions-button'),
+                      onPressed: _reviewInstructions,
+                      child: const Text('Review the instructions'),
+                    ),
+                  ],
+                ],
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _ScanProgressCard extends StatelessWidget {
+  const _ScanProgressCard({required this.message});
+
+  final String message;
+
+  @override
+  Widget build(BuildContext context) {
+    return Card(
+      key: const ValueKey('scan-progress'),
+      margin: EdgeInsets.zero,
+      child: Padding(
+        padding: const EdgeInsets.all(18),
+        child: Row(
+          children: [
+            const SizedBox.square(
+              dimension: 26,
+              child: CircularProgressIndicator(strokeWidth: 3),
+            ),
+            const SizedBox(width: 14),
+            Expanded(
+              child: Text(
+                message,
+                style: const TextStyle(fontWeight: FontWeight.w700),
+              ),
+            ),
+          ],
+        ),
+      ),
     );
   }
 }
@@ -698,7 +550,7 @@ class _ScanPreparationCard extends StatelessWidget {
             ),
             const SizedBox(height: 7),
             const Text(
-              'Follow these steps before opening the camera so Seamly can estimate your measurements from a clear full-body photo.',
+              'Seamly takes three photos by itself as you turn: front, side, then back. Set up first so it can measure you from a clear full-body view.',
               style: TextStyle(height: 1.4),
             ),
             const SizedBox(height: 20),
@@ -712,7 +564,7 @@ class _ScanPreparationCard extends StatelessWidget {
               icon: Icons.accessibility_new_rounded,
               title: 'Show your full body',
               detail:
-                  'Face forward with your head and feet visible. Stand straight with your arms slightly away from your sides.',
+                  'Stand straight with your head and feet both inside the guide and your arms slightly away from your sides.',
             ),
             const _PreparationStep(
               icon: Icons.checkroom_outlined,
@@ -722,15 +574,15 @@ class _ScanPreparationCard extends StatelessWidget {
             ),
             const _PreparationStep(
               icon: Icons.phone_iphone_rounded,
-              title: 'Position the phone',
+              title: 'Prop up the phone',
               detail:
-                  'Keep it upright and steady, about 2–3 metres away, against a plain contrasting background.',
+                  'Lean it upright against something steady, about 2–3 metres away, with the back camera facing you and a plain background behind you.',
             ),
             const _PreparationStep(
-              icon: Icons.people_outline_rounded,
-              title: 'Get help or prop the phone',
+              icon: Icons.rotate_right_rounded,
+              title: 'Turn when the screen says so',
               detail:
-                  'Selfies cannot fit a full body. Ask someone to use the back camera, or prop the phone upright and use the timer or a gallery photo.',
+                  'Face the camera first. Then turn to your left for the side photo, and turn your back for the last one. Hold still until the guide turns green.',
             ),
             const SizedBox(height: 4),
             Container(
@@ -776,7 +628,7 @@ class _ScanPreparationCard extends StatelessWidget {
               contentPadding: EdgeInsets.zero,
               controlAffinity: ListTileControlAffinity.leading,
               title: const Text(
-                'I consent to sending this photo to the configured scan API for in-memory measurement and color analysis.',
+                'I consent to measuring my body from photos on this phone. Only the measurements are sent to Seamly. My front photo is also sent for color analysis and is processed in memory, not kept.',
                 style: TextStyle(fontSize: 13.5),
               ),
             ),

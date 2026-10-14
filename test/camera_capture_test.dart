@@ -1,25 +1,30 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:typed_data';
 
-import 'package:camera/camera.dart' as camera;
-import 'package:camera_platform_interface/camera_platform_interface.dart';
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
-import 'package:image_picker_platform_interface/image_picker_platform_interface.dart';
-import 'package:seamly/features/camera_capture_view.dart';
 import 'package:seamly/features/camera_measurement_screen.dart';
-import 'package:seamly/services/person_segmentation.dart';
+import 'package:seamly/features/guided_scan_screen.dart';
+import 'package:seamly/services/body_profile_extractor.dart';
+import 'package:seamly/services/pose_scan_service.dart';
 import 'package:seamly/services/seamly_api.dart';
 
+/// A real 1x1 PNG so Image.memory can decode it.
 final _photo = base64Decode(
   'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a7l8AAAAASUVORK5CYII=',
 );
-const _description = CameraDescription(
-  name: 'test-camera',
-  lensDirection: CameraLensDirection.back,
-  sensorOrientation: 90,
+
+const _profile = BodyProfile(
+  heightCm: 165.0,
+  frontWidthsCm: {'chest': 30.0, 'waist': 26.0, 'high_hip': 30.0, 'hip': 34.0},
+  sideDepthsCm: {'chest': 21.0, 'waist': 19.0, 'high_hip': 22.0, 'hip': 24.0},
+  backWidthsCm: {},
+  shoulderCm: 38.0,
+  hipToAnkleCm: 80.0,
+  warnings: [],
 );
+
 final _bodyResult = <String, dynamic>{
   'person_detected': true,
   'scan_confidence': 0.85,
@@ -45,6 +50,7 @@ final _bodyResult = <String, dynamic>{
   'validation_status': 'Estimated measurements',
   'disclaimer': 'Confirm with a tape measure.',
 };
+
 const _colorResult = <String, dynamic>{
   'color_season': 'Soft Autumn',
   'palette': ['#9C7253', '#7A836C', '#DCB38A'],
@@ -55,358 +61,200 @@ const _colorResult = <String, dynamic>{
 };
 
 void main() {
-  for (final size in [
-    const Size(430, 900),
-    const Size(320, 568),
-    const Size(844, 390),
-  ]) {
-    testWidgets('camera fills $size without stretching or clipping controls', (
-      tester,
-    ) async {
-      _viewport(tester, size);
-      final controller = _PreviewController();
-      addTearDown(controller.dispose);
-      await tester.pumpWidget(
-        MaterialApp(
-          home: MediaQuery(
-            data: MediaQueryData(
-              size: size,
-              padding: const EdgeInsets.only(top: 44, bottom: 24),
-              textScaler: const TextScaler.linear(1.6),
-            ),
-            child: Scaffold(
-              body: _view(
-                controller: controller,
-                previewReady: true,
-                previewGuidance: 'Ready — hold still and take the photo.',
-                previewBbox: const [0.3, 0.08, 0.4, 0.84],
-              ),
-            ),
-          ),
-        ),
-      );
-      expect(
-        tester.getSize(find.byKey(const ValueKey('camera-preview-surface'))),
-        size,
-      );
-      final previewSize = tester.getSize(find.byType(camera.CameraPreview));
-      expect(previewSize.aspectRatio, closeTo(1080 / 1920, 0.001));
-      expect(
-        tester.widget<FittedBox>(find.byType(FittedBox)).fit,
-        BoxFit.cover,
-      );
-      await tester.ensureVisible(find.byKey(const ValueKey('camera-shutter')));
-      final shutter = tester.getRect(
-        find.byKey(const ValueKey('camera-shutter')),
-      );
-      expect(shutter.top, greaterThanOrEqualTo(44));
-      expect(shutter.bottom, lessThanOrEqualTo(size.height - 24));
-      expect(
-        find.text('Ready — hold still and take the photo.'),
-        findsOneWidget,
-      );
-      expect(tester.takeException(), isNull);
-    });
-  }
-
-  testWidgets('green ready banner appears below the preview when ready', (
+  testWidgets('the camera opens only after both checks are ticked', (
     tester,
   ) async {
     _viewport(tester, const Size(430, 900));
-    final controller = _PreviewController();
-    addTearDown(controller.dispose);
-    await tester.pumpWidget(
-      MaterialApp(
-        home: Scaffold(
-          body: _view(
-            controller: controller,
-            previewReady: true,
-            previewGuidance: 'Ready — hold still and take the photo.',
-            previewBbox: const [0.3, 0.08, 0.4, 0.84],
-          ),
-        ),
-      ),
-    );
-    expect(find.byKey(const ValueKey('camera-ready-banner')), findsOneWidget);
-    expect(find.text('Good to go — take the picture!'), findsOneWidget);
-    expect(tester.takeException(), isNull);
+    await tester.pumpWidget(_screen(_ScanApi(), _FakeExtractor()));
+    final start = find.byKey(const ValueKey('start-guided-scan-button'));
+    expect(tester.widget<FilledButton>(start).onPressed, isNull);
 
-    await tester.pumpWidget(
-      MaterialApp(
-        home: Scaffold(
-          body: _view(
-            controller: controller,
-            previewGuidance: 'Stand fully visible in the frame.',
-          ),
-        ),
-      ),
-    );
-    expect(find.byKey(const ValueKey('camera-ready-banner')), findsNothing);
-    expect(find.text('Good to go — take the picture!'), findsNothing);
-    expect(tester.takeException(), isNull);
+    await _tapKey(tester, 'scan-preparation-checkbox');
+    expect(tester.widget<FilledButton>(start).onPressed, isNull);
+    await _tapKey(tester, 'scan-consent-checkbox');
+    expect(tester.widget<FilledButton>(start).onPressed, isNotNull);
+
+    await _tapKey(tester, 'start-guided-scan-button');
+    expect(find.byKey(const ValueKey('fake-scan-done')), findsOneWidget);
+    expect(find.text('Prepare for your body scan'), findsNothing);
   });
 
-  testWidgets('repeated failures suggest the gallery and back camera', (
+  testWidgets('cancelling the camera returns to the instructions', (
     tester,
   ) async {
     _viewport(tester, const Size(430, 900));
-    await tester.pumpWidget(
-      MaterialApp(
-        home: Scaffold(
-          body: _view(
-            error: 'No clearly framed full-body person was detected.',
-            showRetryTip: true,
-          ),
-        ),
-      ),
-    );
-    expect(find.byKey(const ValueKey('camera-gallery-tip')), findsOneWidget);
-    expect(find.textContaining('back camera'), findsOneWidget);
+    await tester.pumpWidget(_screen(_ScanApi(), _FakeExtractor()));
+    await _beginScan(tester);
+    await tester.tap(find.byKey(const ValueKey('fake-scan-cancel')));
+    await tester.pump();
+    expect(find.text('Prepare for your body scan'), findsOneWidget);
+    expect(find.byKey(const ValueKey('fake-scan-done')), findsNothing);
+  });
 
+  testWidgets('photos are measured on the phone and only numbers are sent', (
+    tester,
+  ) async {
+    _viewport(tester, const Size(430, 900));
+    final api = _ScanApi();
+    final extractor = _FakeExtractor();
+    var saved = 0;
+    String? season;
     await tester.pumpWidget(
-      MaterialApp(
-        home: Scaffold(
-          body: _view(
-            error: 'No clearly framed full-body person was detected.',
-          ),
-        ),
+      _screen(
+        api,
+        extractor,
+        onMeasurements: (_) => saved++,
+        onColor: (value) => season = value,
       ),
     );
-    expect(find.byKey(const ValueKey('camera-gallery-tip')), findsNothing);
+    await _beginScan(tester);
+    await tester.tap(find.byKey(const ValueKey('fake-scan-done')));
+    await tester.pump();
+    expect(find.byKey(const ValueKey('scan-progress')), findsOneWidget);
+    expect(extractor.heightCm, 165);
+    expect(extractor.received!.keys, containsAll(ScanAngle.values));
+
+    await tester.pump();
+    expect(api.profileCalls, 1);
+    expect(api.profileJson!['height_cm'], 165);
+    expect(api.profileJson!.containsKey('image_base64'), isFalse);
+
+    api.profile.complete(_bodyResult);
+    await tester.pump();
+    expect(saved, 1);
+    expect(api.colorCalls, 1);
+    expect(api.colorImageBytes, same(_photo));
+
+    api.color.complete(_colorResult);
+    await tester.pumpAndSettle();
+    expect(season, 'Soft Autumn');
+    expect(find.byKey(const ValueKey('scan-progress')), findsNothing);
+    expect(find.byKey(const ValueKey('camera-view-results')), findsOneWidget);
     expect(tester.takeException(), isNull);
   });
 
-  testWidgets('landscape result controls scroll without overflowing', (
+  testWidgets('a photo problem shows its message and offers a retake', (
     tester,
   ) async {
-    _viewport(tester, const Size(844, 390));
+    _viewport(tester, const Size(430, 900));
+    final api = _ScanApi();
+    final extractor = _FakeExtractor()
+      ..failWith = const ScanExtractionException(
+        'Your body outline was not clear enough.',
+      );
+    await tester.pumpWidget(_screen(api, extractor));
+    await _beginScan(tester);
+    await tester.tap(find.byKey(const ValueKey('fake-scan-done')));
+    await tester.pumpAndSettle();
+
+    expect(find.text('Your body outline was not clear enough.'), findsOneWidget);
+    expect(api.profileCalls, 0);
+    expect(find.byKey(const ValueKey('camera-view-results')), findsNothing);
+
+    await tester.ensureVisible(find.byKey(const ValueKey('scan-again-button')));
+    await tester.tap(find.byKey(const ValueKey('scan-again-button')));
+    await tester.pump();
+    expect(find.byKey(const ValueKey('fake-scan-done')), findsOneWidget);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('a server error is shown and color analysis is skipped', (
+    tester,
+  ) async {
+    _viewport(tester, const Size(430, 900));
+    final api = _ScanApi();
+    var saved = 0;
     await tester.pumpWidget(
-      MaterialApp(
-        home: Scaffold(
-          body: _view(
-            captured: true,
-            colorResult: _colorResult,
-            hasResults: true,
-            error:
-                'Some measurements need another photo. Keep your whole body visible.',
-          ),
-        ),
-      ),
+      _screen(api, _FakeExtractor(), onMeasurements: (_) => saved++),
+    );
+    await _beginScan(tester);
+    await tester.tap(find.byKey(const ValueKey('fake-scan-done')));
+    await tester.pump();
+    await tester.pump();
+    api.profile.completeError(
+      const ApiException('The scan did not capture enough of your torso.'),
     );
     await tester.pumpAndSettle();
-    await tester.ensureVisible(find.byKey(const ValueKey('camera-shutter')));
+
+    expect(
+      find.text('The scan did not capture enough of your torso.'),
+      findsOneWidget,
+    );
+    expect(api.colorCalls, 0);
+    expect(saved, 0);
     expect(tester.takeException(), isNull);
   });
 
-  testWidgets('color analysis disables gallery, retake and switch', (
+  testWidgets('a late body response cannot save after leaving the scanner', (
     tester,
   ) async {
     _viewport(tester, const Size(430, 900));
+    final api = _ScanApi();
+    final extractor = _FakeExtractor();
+    var saved = 0;
     await tester.pumpWidget(
-      MaterialApp(home: Scaffold(body: _view(captured: true, busy: true))),
+      _screen(api, extractor, onMeasurements: (_) => saved++),
     );
-    expect(
-      tester
-          .widget<IconButton>(find.byKey(const ValueKey('camera-shutter')))
-          .onPressed,
-      isNull,
+    await _beginScan(tester);
+    await tester.tap(find.byKey(const ValueKey('fake-scan-done')));
+    await tester.pump();
+    await tester.pump();
+    expect(api.profileCalls, 1);
+
+    await tester.pumpWidget(
+      _screen(api, extractor, active: false, onMeasurements: (_) => saved++),
     );
-    for (final tooltip in ['Choose photo', 'Switch camera']) {
-      expect(
-        tester
-            .widget<IconButton>(
-              find.byWidgetPredicate(
-                (widget) => widget is IconButton && widget.tooltip == tooltip,
-              ),
-            )
-            .onPressed,
-        isNull,
-      );
-    }
-    expect(find.byKey(const ValueKey('camera-view-results')), findsNothing);
+    api.profile.complete(_bodyResult);
+    await tester.pumpAndSettle();
+    expect(saved, 0);
+    expect(api.colorCalls, 0);
+    expect(tester.takeException(), isNull);
   });
 
-  group('scan lifecycle', () {
-    late CameraPlatform oldCamera;
-    late ImagePickerPlatform oldPicker;
-    late _NoCameraPlatform platform;
-    late _PhotoPicker picker;
-    setUp(() {
-      oldCamera = CameraPlatform.instance;
-      oldPicker = ImagePickerPlatform.instance;
-      platform = _NoCameraPlatform();
-      picker = _PhotoPicker();
-      CameraPlatform.instance = platform;
-      ImagePickerPlatform.instance = picker;
-    });
-    tearDown(() {
-      CameraPlatform.instance = oldCamera;
-      ImagePickerPlatform.instance = oldPicker;
-    });
-
-    testWidgets('leaving before camera discovery prevents initialization', (
-      tester,
-    ) async {
-      _viewport(tester, const Size(430, 900));
-      platform.discovery = Completer<List<CameraDescription>>();
-      await tester.pumpWidget(_screen(_ScanApi()));
-      await _acceptInstructions(tester);
-      await tester.pumpWidget(const SizedBox());
-      platform.discovery!.complete([_description]);
-      await tester.pumpAndSettle();
-      expect(platform.created, 0);
-      expect(tester.takeException(), isNull);
-    });
-
-    testWidgets(
-      'permission interruption waits for initializing camera cleanup',
-      (tester) async {
-        _viewport(tester, const Size(430, 900));
-        final delayed = _DelayedCameraPlatform();
-        CameraPlatform.instance = delayed;
-        await tester.pumpWidget(_screen(_ScanApi()));
-        await _acceptInstructions(tester);
-        expect(delayed.operations, ['create 1']);
-        tester.binding.handleAppLifecycleStateChanged(
-          AppLifecycleState.inactive,
-        );
-        tester.binding.handleAppLifecycleStateChanged(
-          AppLifecycleState.resumed,
-        );
-        await tester.pump();
-        expect(delayed.operations, ['create 1']);
-        delayed.firstCreation.complete(1);
-        await tester.pumpAndSettle();
-        expect(delayed.operations, ['create 1', 'dispose 1', 'create 2']);
-        await tester.pumpWidget(const SizedBox());
-        await tester.pumpAndSettle();
-        expect(delayed.operations.last, 'dispose 2');
-        expect(tester.takeException(), isNull);
-      },
+  testWidgets('a late color response is ignored after leaving', (tester) async {
+    _viewport(tester, const Size(430, 900));
+    final api = _ScanApi();
+    final extractor = _FakeExtractor();
+    var seasons = 0;
+    await tester.pumpWidget(
+      _screen(api, extractor, onColor: (_) => seasons++),
     );
+    await _beginScan(tester);
+    await tester.tap(find.byKey(const ValueKey('fake-scan-done')));
+    await tester.pump();
+    await tester.pump();
+    api.profile.complete(_bodyResult);
+    await tester.pump();
+    expect(api.colorCalls, 1);
 
-    testWidgets('late body response cannot save after leaving the camera', (
-      tester,
-    ) async {
-      _viewport(tester, const Size(430, 900));
-      final api = _ScanApi();
-      var saved = 0;
-      await tester.pumpWidget(_screen(api, onMeasurements: (_) => saved++));
-      await _acceptInstructions(tester);
-      await tester.pumpAndSettle();
-      await tester.tap(find.byTooltip('Choose photo'));
-      await tester.pump();
-      expect(api.bodyCalls, 1);
-      await tester.pumpWidget(
-        _screen(api, active: false, onMeasurements: (_) => saved++),
-      );
-      api.body.complete(_bodyResult);
-      await tester.pumpAndSettle();
-      expect(saved, 0);
-      expect(api.colorCalls, 0);
-      expect(tester.takeException(), isNull);
-    });
-
-    testWidgets('late color response is ignored after leaving', (tester) async {
-      _viewport(tester, const Size(430, 900));
-      final api = _ScanApi();
-      var saved = 0;
-      await tester.pumpWidget(_screen(api, onColor: (_) => saved++));
-      await _acceptInstructions(tester);
-      await tester.pumpAndSettle();
-      await tester.tap(find.byTooltip('Choose photo'));
-      await tester.pump();
-      api.body.complete(_bodyResult);
-      await tester.pump();
-      expect(api.colorCalls, 1);
-      expect(
-        tester
-            .widget<IconButton>(find.byKey(const ValueKey('camera-shutter')))
-            .onPressed,
-        isNull,
-      );
-      await tester.pumpWidget(
-        _screen(api, active: false, onColor: (_) => saved++),
-      );
-      api.color.complete(_colorResult);
-      await tester.pumpAndSettle();
-      expect(saved, 0);
-      expect(tester.takeException(), isNull);
-    });
-
-    testWidgets(
-      'returning from gallery does not restart camera while waiting for photo',
-      (tester) async {
-        _viewport(tester, const Size(430, 900));
-        picker.selection = Completer<XFile?>();
-        await tester.pumpWidget(_screen(_ScanApi()));
-        await _acceptInstructions(tester);
-        await tester.pumpAndSettle();
-        await tester.tap(find.byTooltip('Choose photo'));
-        await tester.pump();
-        final discoveries = platform.discovered;
-        tester.binding.handleAppLifecycleStateChanged(
-          AppLifecycleState.inactive,
-        );
-        tester.binding.handleAppLifecycleStateChanged(
-          AppLifecycleState.resumed,
-        );
-        await tester.pump();
-        expect(platform.discovered, discoveries);
-        await tester.pumpWidget(const SizedBox());
-        picker.selection!.complete(XFile.fromData(_photo));
-        await tester.pumpAndSettle();
-        expect(tester.takeException(), isNull);
-      },
+    await tester.pumpWidget(
+      _screen(api, extractor, active: false, onColor: (_) => seasons++),
     );
+    api.color.complete(_colorResult);
+    await tester.pumpAndSettle();
+    expect(seasons, 0);
+    expect(tester.takeException(), isNull);
+  });
 
-    testWidgets('segmented photo feeds body analysis, original feeds color', (
-      tester,
-    ) async {
-      _viewport(tester, const Size(430, 900));
-      final api = _ScanApi();
-      final cleaned = Uint8List.fromList([..._photo, 0]);
-      await tester.pumpWidget(
-        _screen(
-          api,
-          segmenter: PersonSegmentation(
-            isolateForeground: (_) async => cleaned,
-          ),
-        ),
-      );
-      await _acceptInstructions(tester);
-      await tester.pumpAndSettle();
-      await tester.tap(find.byTooltip('Choose photo'));
-      await tester.pump();
-      api.body.complete(_bodyResult);
-      await tester.pump();
-      api.color.complete(_colorResult);
-      await tester.pumpAndSettle();
-      expect(api.bodyImageBytes, same(cleaned));
-      expect(api.colorImageBytes, isNot(same(cleaned)));
-      expect(tester.takeException(), isNull);
-    });
-
-    testWidgets('results remain readable on a small screen with large text', (      tester,
-    ) async {
-      _viewport(tester, const Size(320, 568));
-      final api = _ScanApi();
-      api.body.complete(_bodyResult);
-      api.color.complete(_colorResult);
-      await tester.pumpWidget(_screen(api, textScale: 2));
-      await _acceptInstructions(tester);
-      await tester.pumpAndSettle();
-      await tester.tap(find.byTooltip('Choose photo'));
-      await tester.pumpAndSettle();
-      await tester.ensureVisible(
-        find.byKey(const ValueKey('camera-view-results')),
-      );
-      await tester.tap(find.byKey(const ValueKey('camera-view-results')));
-      await tester.pumpAndSettle();
-      expect(find.text('Your scan'), findsOneWidget);
-      expect(find.text('Natural waist'), findsOneWidget);
-      expect(tester.takeException(), isNull);
-    });
+  testWidgets('results remain readable on a small screen with large text', (
+    tester,
+  ) async {
+    _viewport(tester, const Size(320, 568));
+    final api = _ScanApi();
+    api.profile.complete(_bodyResult);
+    api.color.complete(_colorResult);
+    await tester.pumpWidget(_screen(api, _FakeExtractor(), textScale: 2));
+    await _beginScan(tester);
+    await tester.tap(find.byKey(const ValueKey('fake-scan-done')));
+    await tester.pumpAndSettle();
+    await tester.ensureVisible(
+      find.byKey(const ValueKey('camera-view-results')),
+    );
+    await tester.tap(find.byKey(const ValueKey('camera-view-results')));
+    await tester.pumpAndSettle();
+    expect(find.text('Your scan'), findsOneWidget);
+    expect(find.text('Natural waist'), findsOneWidget);
+    expect(tester.takeException(), isNull);
   });
 }
 
@@ -417,26 +265,42 @@ void _viewport(WidgetTester tester, Size size) {
   addTearDown(tester.view.resetDevicePixelRatio);
 }
 
-Future<void> _acceptInstructions(WidgetTester tester) async {
+Future<void> _tapKey(WidgetTester tester, String key) async {
+  final target = find.byKey(ValueKey(key));
+  await tester.ensureVisible(target);
+  await tester.tap(target);
+  await tester.pump();
+}
+
+/// Ticks both checkboxes and opens the (fake) camera step.
+Future<void> _beginScan(WidgetTester tester) async {
   for (final key in [
     'scan-preparation-checkbox',
     'scan-consent-checkbox',
     'start-guided-scan-button',
   ]) {
-    final target = find.byKey(ValueKey(key));
-    await tester.ensureVisible(target);
-    await tester.tap(target);
-    await tester.pump();
+    await _tapKey(tester, key);
   }
 }
 
+Map<ScanAngle, ScanShot> _shots() => {
+  for (final angle in ScanAngle.values)
+    angle: ScanShot(
+      angle: angle,
+      jpegBytes: angle == ScanAngle.front
+          ? _photo
+          : Uint8List.fromList([angle.index]),
+      keyPoints: const {},
+    ),
+};
+
 Widget _screen(
-  _ScanApi api, {
+  _ScanApi api,
+  _FakeExtractor extractor, {
   bool active = true,
   ValueChanged<Map<String, double>>? onMeasurements,
   ValueChanged<String>? onColor,
   double textScale = 1,
-  PersonSegmentation? segmenter,
 }) => MaterialApp(
   builder: (context, child) => MediaQuery(
     data: MediaQuery.of(
@@ -453,163 +317,73 @@ Widget _screen(
       onMeasurementsReady: onMeasurements ?? (_) {},
       onColorSeasonAnalyzed: onColor ?? (_) {},
       onOpenShop: () {},
-      segmenter: segmenter,
+      extractor: extractor,
+      scanBuilder: (onCompleted, onCancel) =>
+          _FakeScan(onCompleted: onCompleted, onCancel: onCancel),
     ),
   ),
 );
 
-CameraCaptureView _view({
-  camera.CameraController? controller,
-  bool captured = false,
-  bool busy = false,
-  Map<String, dynamic>? colorResult,
-  bool hasResults = false,
-  String? error,
-  bool previewReady = false,
-  String? previewGuidance,
-  List<double>? previewBbox,
-  bool showRetryTip = false,
-}) => CameraCaptureView(
-  controller: controller,
-  starting: false,
-  photoBytes: captured ? _photo : null,
-  busy: busy,
-  analyzingColor: busy,
-  error: error,
-  colorResult: colorResult,
-  hasResults: hasResults,
-  previewReady: previewReady,
-  previewGuidance: previewGuidance,
-  previewBbox: previewBbox,
-  showRetryTip: showRetryTip,
-  onBack: () {},
-  onHelp: () {},
-  onCapture: () {},
-  onRetake: () {},
-  onGallery: () {},
-  onSwitch: () {},
-  onRetry: () {},
-  onResults: () {},
-);
+/// Stands in for the guided camera: two buttons instead of a live preview.
+class _FakeScan extends StatelessWidget {
+  const _FakeScan({required this.onCompleted, required this.onCancel});
 
-class _PreviewController extends camera.CameraController {
-  _PreviewController() : super(_description, ResolutionPreset.high) {
-    value = value.copyWith(
-      isInitialized: true,
-      previewSize: const Size(1920, 1080),
-      deviceOrientation: DeviceOrientation.portraitUp,
-    );
-  }
+  final ValueChanged<Map<ScanAngle, ScanShot>> onCompleted;
+  final VoidCallback onCancel;
+
   @override
-  Widget buildPreview() => const ColoredBox(color: Colors.blueGrey);
+  Widget build(BuildContext context) => Column(
+    children: [
+      TextButton(
+        key: const ValueKey('fake-scan-done'),
+        onPressed: () => onCompleted(_shots()),
+        child: const Text('Finish fake scan'),
+      ),
+      TextButton(
+        key: const ValueKey('fake-scan-cancel'),
+        onPressed: onCancel,
+        child: const Text('Cancel fake scan'),
+      ),
+    ],
+  );
 }
 
-class _NoCameraPlatform extends CameraPlatform {
-  Completer<List<CameraDescription>>? discovery;
-  int created = 0;
-  int discovered = 0;
-  @override
-  Future<List<CameraDescription>> availableCameras() {
-    discovered++;
-    return discovery?.future ?? Future.value([]);
-  }
+class _FakeExtractor implements BodyProfileExtractor {
+  Object? failWith;
+  Map<ScanAngle, ScanShot>? received;
+  double? heightCm;
 
   @override
-  Future<int> createCamera(
-    CameraDescription cameraDescription,
-    ResolutionPreset? resolutionPreset, {
-    bool enableAudio = false,
+  Future<BodyProfile> extract({
+    required Map<ScanAngle, ScanShot> shots,
+    required double heightCm,
   }) async {
-    created++;
-    throw StateError('No camera should be initialized in this test');
-  }
-}
-
-class _PhotoPicker extends ImagePickerPlatform {
-  Completer<XFile?>? selection;
-  @override
-  Future<XFile?> getImageFromSource({
-    required ImageSource source,
-    ImagePickerOptions options = const ImagePickerOptions(),
-  }) => selection?.future ?? Future.value(XFile.fromData(_photo));
-}
-
-class _DelayedCameraPlatform extends _NoCameraPlatform {
-  final firstCreation = Completer<int>();
-  final operations = <String>[];
-  @override
-  Future<List<CameraDescription>> availableCameras() async => [_description];
-  @override
-  Stream<DeviceOrientationChangedEvent> onDeviceOrientationChanged() =>
-      const Stream.empty();
-  @override
-  Future<int> createCamera(
-    CameraDescription cameraDescription,
-    ResolutionPreset? resolutionPreset, {
-    bool enableAudio = false,
-  }) {
-    created++;
-    operations.add('create $created');
-    return created == 1 ? firstCreation.future : Future.value(created);
+    received = shots;
+    this.heightCm = heightCm;
+    final failure = failWith;
+    if (failure != null) throw failure;
+    return _profile;
   }
 
   @override
-  Stream<CameraInitializedEvent> onCameraInitialized(int cameraId) =>
-      Stream.value(
-        CameraInitializedEvent(
-          cameraId,
-          1920,
-          1080,
-          ExposureMode.auto,
-          true,
-          FocusMode.auto,
-          true,
-        ),
-      );
-  @override
-  Stream<CameraErrorEvent> onCameraError(int cameraId) => Stream.multi((_) {});
-  @override
-  Future<void> initializeCamera(
-    int cameraId, {
-    ImageFormatGroup imageFormatGroup = ImageFormatGroup.unknown,
-  }) async {}
-  @override
-  Future<void> dispose(int cameraId) async =>
-      operations.add('dispose $cameraId');
-  @override
-  Widget buildPreview(int cameraId) => const ColoredBox(color: Colors.blueGrey);
+  Future<void> dispose() async {}
 }
 
 class _ScanApi extends SeamlyApi {
-  final body = Completer<Map<String, dynamic>>();
+  final profile = Completer<Map<String, dynamic>>();
   final color = Completer<Map<String, dynamic>>();
-  int bodyCalls = 0;
+  int profileCalls = 0;
   int colorCalls = 0;
-  int previewCalls = 0;
-  Uint8List? bodyImageBytes;
+  Map<String, dynamic>? profileJson;
   Uint8List? colorImageBytes;
-  @override
-  Future<Map<String, dynamic>> previewBodyPhoto({
-    required Uint8List imageBytes,
-  }) {
-    previewCalls++;
-    return Future.value({
-      'ready': false,
-      'person_detected': false,
-      'person_confidence': 0.0,
-      'guidance': 'Stand fully visible in the frame.',
-      'bbox': null,
-    });
-  }
 
   @override
-  Future<Map<String, dynamic>> analyzeBodyPhoto({
-    required Uint8List imageBytes,
-    required double referenceHeightCm,
-  }) {
-    bodyCalls++;
-    bodyImageBytes = imageBytes;
-    return body.future;
+  Future<Map<String, dynamic>> analyzeBodyProfile(
+    Map<String, dynamic> profileJson,
+  ) {
+    profileCalls++;
+    this.profileJson = profileJson;
+    return profile.future;
   }
 
   @override

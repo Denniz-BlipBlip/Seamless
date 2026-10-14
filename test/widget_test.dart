@@ -468,7 +468,9 @@ void main() {
     expect(find.text('Today’s context'), findsOneWidget);
   });
 
-  testWidgets('shows scan instructions before opening the body camera', (
+  // The guided camera itself needs a real device; its flow is covered in
+  // camera_capture_test.dart with a stand-in camera step.
+  testWidgets('shows scan instructions and unlocks the camera after both checks', (
     tester,
   ) async {
     _useMobileTestViewport(tester);
@@ -492,6 +494,7 @@ void main() {
     expect(find.text('Prepare for your body scan'), findsOneWidget);
     expect(find.text('Move to a well-lit area'), findsOneWidget);
     expect(find.text('Show your full body'), findsOneWidget);
+    expect(find.text('Turn when the screen says so'), findsOneWidget);
     final startButton = find.byKey(const ValueKey('start-guided-scan-button'));
     expect(tester.widget<FilledButton>(startButton).onPressed, isNull);
 
@@ -506,16 +509,6 @@ void main() {
     await tester.pump();
 
     expect(tester.widget<FilledButton>(startButton).onPressed, isNotNull);
-    await tester.ensureVisible(startButton);
-    await tester.tap(startButton);
-    await tester.pump();
-
-    expect(find.text('Even light · Head to toe in frame'), findsOneWidget);
-    expect(
-      tester.getSize(find.byKey(const ValueKey('camera-preview-surface'))),
-      const Size(430, 900),
-    );
-    expect(find.byTooltip('Take photo'), findsOneWidget);
   });
 }
 
@@ -713,5 +706,3 @@ void _useMobileTestViewport(WidgetTester tester) {
   addTearDown(tester.view.resetPhysicalSize);
   addTearDown(tester.view.resetDevicePixelRatio);
 }
-
-

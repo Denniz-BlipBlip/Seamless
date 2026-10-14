@@ -1,5 +1,4 @@
 import 'dart:async';
-import 'dart:typed_data';
 
 import 'package:camera/camera.dart';
 import 'package:flutter/material.dart';
@@ -24,7 +23,7 @@ class ScanShot {
 
 /// Hands-free scan: the user stands back, the phone watches the pose, and
 /// each photo is taken automatically once the pose is right and steady.
-/// Order: front, side, back.
+/// Order: front, side, back. The back photo can be skipped.
 class GuidedScanScreen extends StatefulWidget {
   const GuidedScanScreen({
     super.key,
@@ -235,6 +234,15 @@ class _GuidedScanScreenState extends State<GuidedScanScreen>
     }
   }
 
+  /// Finish with the front and side photos only. Offered on the last step so
+  /// a back photo that is never recognised cannot block the whole scan.
+  Future<void> _skipBack() async {
+    if (_capturing || _finished || _shots.length < 2) return;
+    _finished = true;
+    await _closeCamera();
+    if (mounted) widget.onCompleted(Map.of(_shots));
+  }
+
   void _flashOnce() {
     if (!mounted) return;
     setState(() => _flash = true);
@@ -251,6 +259,7 @@ class _GuidedScanScreenState extends State<GuidedScanScreen>
     final cooling = DateTime.now().isBefore(_cooldownUntil);
     final good = !cooling && (result?.good ?? false);
     final progress = cooling ? 0.0 : (result?.holdProgress ?? 0.0);
+    final onBackStep = _index == _order.length - 1;
     final guidance =
         _error ??
         (cooling
@@ -342,7 +351,17 @@ class _GuidedScanScreenState extends State<GuidedScanScreen>
                           backgroundColor: Colors.white24,
                         ),
                       ),
-                    const SizedBox(height: 10),
+                    if (onBackStep && ready && !_capturing)
+                      TextButton(
+                        key: const ValueKey('skip-back-photo'),
+                        onPressed: _skipBack,
+                        style: TextButton.styleFrom(
+                          foregroundColor: Colors.white,
+                          minimumSize: const Size(48, 48),
+                        ),
+                        child: const Text('Skip back photo'),
+                      ),
+                    const SizedBox(height: 6),
                     const Text(
                       'Lean the phone upright 2–3 m away. The photo is taken automatically.',
                       textAlign: TextAlign.center,

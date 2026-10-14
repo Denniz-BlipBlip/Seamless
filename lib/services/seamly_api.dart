@@ -117,6 +117,8 @@ class SeamlyApi {
     });
   }
 
+  // Old single-photo scan endpoints. The new guided scan no longer calls
+  // them; they go away with the backend endpoints in Step 6.
   Future<Map<String, dynamic>> previewBodyPhoto({
     required Uint8List imageBytes,
   }) {
@@ -135,6 +137,17 @@ class SeamlyApi {
       'reference_height_cm': referenceHeightCm,
       'consent_confirmed': true,
     }, timeout: const Duration(seconds: 90));
+  }
+
+  /// Guided scan: sends only the widths and depths measured on the phone
+  /// (the output of `BodyProfile.toJson()`), never a photo.
+  Future<Map<String, dynamic>> analyzeBodyProfile(
+    Map<String, dynamic> profileJson,
+  ) {
+    return _post('/v1/body-scan/profile', {
+      ...profileJson,
+      'consent_confirmed': true,
+    }, timeout: const Duration(seconds: 30));
   }
 
   Future<Map<String, dynamic>> analyzeAppearancePhoto({

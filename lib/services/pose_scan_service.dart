@@ -93,6 +93,19 @@ class PoseScanService {
             ),
           );
 
+  /// Landmarks that must all be present for a frame to count.
+  static const _needed = {
+    'nose': PoseLandmarkType.nose,
+    'lShoulder': PoseLandmarkType.leftShoulder,
+    'rShoulder': PoseLandmarkType.rightShoulder,
+    'lHip': PoseLandmarkType.leftHip,
+    'rHip': PoseLandmarkType.rightHip,
+    'lKnee': PoseLandmarkType.leftKnee,
+    'rKnee': PoseLandmarkType.rightKnee,
+    'lAnkle': PoseLandmarkType.leftAnkle,
+    'rAnkle': PoseLandmarkType.rightAnkle,
+  };
+
   final PoseDetector _detector;
   final List<Offset> _motion = [];
   DateTime? _goodSince;
@@ -140,36 +153,17 @@ class PoseScanService {
       reset();
       return _result(guidance: 'Step into the frame.');
     }
-    final lm = pose.landmarks;
-    PoseLandmark? at(PoseLandmarkType type) => lm[type];
 
-    final nose = at(PoseLandmarkType.nose);
-    final ls = at(PoseLandmarkType.leftShoulder);
-    final rs = at(PoseLandmarkType.rightShoulder);
-    final lh = at(PoseLandmarkType.leftHip);
-    final rh = at(PoseLandmarkType.rightHip);
-    final lk = at(PoseLandmarkType.leftKnee);
-    final rk = at(PoseLandmarkType.rightKnee);
-    final la = at(PoseLandmarkType.leftAnkle);
-    final ra = at(PoseLandmarkType.rightAnkle);
-
-    final required = [nose, ls, rs, lh, rh, lk, rk, la, ra];
-    if (required.any((p) => p == null)) {
-      reset();
-      return _result(guidance: 'Step into the frame.');
+    final points = <String, PoseLandmark>{};
+    for (final entry in _needed.entries) {
+      final landmark = pose.landmarks[entry.value];
+      if (landmark == null) {
+        reset();
+        return _result(guidance: 'Step into the frame.');
+      }
+      points[entry.key] = landmark;
     }
 
-    final points = {
-      'nose': nose!,
-      'lShoulder': ls!,
-      'rShoulder': rs!,
-      'lHip': lh!,
-      'rHip': rh!,
-      'lKnee': lk!,
-      'rKnee': rk!,
-      'lAnkle': la!,
-      'rAnkle': ra!,
-    };
     final keyPoints = {
       for (final e in points.entries)
         e.key: Offset(e.value.x / size.width, e.value.y / size.height),
@@ -202,13 +196,20 @@ class PoseScanService {
     );
     final centered = (hipMid.dx - 0.5).abs() <= ScanTuning.centerBand;
 
-    final angle = _classifyAngle(nose, ls, rs, lh, rh);
+    final angle = _classifyAngle(
+      points['lShoulder']!,
+      points['rShoulder']!,
+      points['lHip']!,
+      points['rHip']!,
+    );
 
     // Stillness over the last few frames.
-    _motion.add(Offset(
-      (hipMid.dx + shoulderMid.dx) / 2,
-      (hipMid.dy + shoulderMid.dy) / 2,
-    ));
+    _motion.add(
+      Offset(
+        (hipMid.dx + shoulderMid.dx) / 2,
+        (hipMid.dy + shoulderMid.dy) / 2,
+      ),
+    );
     if (_motion.length > ScanTuning.stillnessWindow) _motion.removeAt(0);
     final still = _isStill();
 
@@ -269,37 +270,37 @@ class PoseScanService {
     final meanY =
         _motion.map((o) => o.dy).reduce((a, b) => a + b) / _motion.length;
     final spread = _motion
-        .map((o) => math.sqrt(math.pow(o.dx - meanX, 2) + math.pow(o.dy - meanY, 2)))
-        .reduce(math.max);
+        .map((o) {
+          final dx = o.dx - meanX;
+          final dy = o.dy - meanY;
+          return math.sqrt(dx * dx + dy * dy);
+        })
+        .fold<double>(0.0, math.max);
     return spread <= ScanTuning.stillnessLimit;
   }
 
   /// Front/back: shoulders wide. Side: shoulders stacked.
-  /// Front vs back uses two votes: left/right order of the shoulders
-  /// (the person's left shoulder appears on the image right when facing the
-  /// camera) and whether the nose is visible.
+  ///
+  /// Front vs back uses the left/right order of the shoulders only: the
+  /// person's left shoulder appears on the image right when they face the
+  /// camera, and on the image left when they face away. ML Kit's landmark
+  /// `likelihood` means "in frame", not "visible", so the nose stays
+  /// confident from behind and is no use as a second vote.
   ScanAngle? _classifyAngle(
-    PoseLandmark nose,
     PoseLandmark ls,
     PoseLandmark rs,
     PoseLandmark lh,
     PoseLandmark rh,
   ) {
     final shoulderWidth = (ls.x - rs.x).abs();
-    final torso = math.sqrt(
-      math.pow((ls.x + rs.x) / 2 - (lh.x + rh.x) / 2, 2) +
-          math.pow((ls.y + rs.y) / 2 - (lh.y + rh.y) / 2, 2),
-    );
+    final dx = (ls.x + rs.x) / 2 - (lh.x + rh.x) / 2;
+    final dy = (ls.y + rs.y) / 2 - (lh.y + rh.y) / 2;
+    final torso = math.sqrt(dx * dx + dy * dy);
     if (torso <= 0) return null;
     final ratio = shoulderWidth / torso;
     if (ratio <= ScanTuning.sideRatioMax) return ScanAngle.side;
     if (ratio < ScanTuning.wideRatioMin) return null; // mid-turn
-    final score =
-        (ls.x > rs.x ? 1 : -1) +
-        (nose.likelihood >= ScanTuning.minLikelihood ? 1 : -1);
-    if (score == 2) return ScanAngle.front;
-    if (score == -2) return ScanAngle.back;
-    return null;
+    return ls.x > rs.x ? ScanAngle.front : ScanAngle.back;
   }
 
   static String _turnCue(ScanAngle target) => switch (target) {
@@ -346,7 +347,7 @@ class PoseScanService {
         metadata: InputImageMetadata(
           size: raw,
           rotation: rotation,
-          format: format!,
+          format: InputImageFormat.nv21,
           bytesPerRow: plane.bytesPerRow,
         ),
       ),
