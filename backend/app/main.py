@@ -7,6 +7,7 @@ from typing import Literal
 import httpx
 from fastapi import FastAPI, Header, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel, Field, field_validator
 
 from .ai_engine import SIZE_CENTRES, SeamlyEngine
 from .outfit_images import OutfitImageService, build_inspiration_query
@@ -18,6 +19,7 @@ from .account_store import (
 )
 from .google_auth import GoogleAuthError, verify_google_id_token
 from .appearance_analysis import AppearanceAnalysisError, AppearanceAnalyzer
+from .color_frames import ColorFramesError, analyze_frames, to_response_fields
 from .body_profile import BodyProfileError, BodyProfileEstimator, BodyProfileRequest
 from .news_feed import FashionNewsService
 from .schemas import (
@@ -78,6 +80,45 @@ weather_style_service = WeatherStyleService()
 shop_catalog_service = ShopCatalogService()
 account_store = create_account_store()
 outfit_image_service = OutfitImageService()
+
+
+def _check_rgb(value: list[int]) -> list[int]:
+    if len(value) != 3 or any(not 0 <= channel <= 255 for channel in value):
+        raise ValueError("Colors must be [red, green, blue] values from 0 to 255.")
+    return value
+
+
+class ColorFrame(BaseModel):
+    """Colors sampled on the phone from one frame. No photo is sent."""
+
+    skin_rgb: list[list[int]] = Field(min_length=50, max_length=600)
+    white_rgb: list[list[int]] | None = Field(default=None, max_length=200)
+    hair_rgb: list[int] | None = None
+    eye_rgb: list[int] | None = None
+
+    @field_validator("skin_rgb", "white_rgb")
+    @classmethod
+    def validate_samples(cls, value: list[list[int]] | None) -> list[list[int]] | None:
+        for color in value or []:
+            _check_rgb(color)
+        return value
+
+    @field_validator("hair_rgb", "eye_rgb")
+    @classmethod
+    def validate_single(cls, value: list[int] | None) -> list[int] | None:
+        return _check_rgb(value) if value is not None else None
+
+
+class ColorFramesRequest(BaseModel):
+    frames: list[ColorFrame] = Field(min_length=3, max_length=12)
+    consent_confirmed: bool
+
+    @field_validator("consent_confirmed")
+    @classmethod
+    def require_consent(cls, value: bool) -> bool:
+        if not value:
+            raise ValueError("Color analysis requires explicit consent")
+        return value
 
 
 @app.get("/health")
@@ -268,6 +309,16 @@ def analyze_profile_photo(
         return appearance_analyzer.analyze(request)
     except AppearanceAnalysisError as error:
         raise HTTPException(status_code=422, detail=str(error)) from error
+
+
+@app.post("/v1/profile/analyze-frames", response_model=AppearanceAnalysisResponse)
+def analyze_color_frames(request: ColorFramesRequest) -> AppearanceAnalysisResponse:
+    """Selfie color analysis from colors sampled on the phone over several frames."""
+    try:
+        result = analyze_frames([frame.model_dump() for frame in request.frames])
+    except ColorFramesError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
+    return AppearanceAnalysisResponse(**to_response_fields(result))
 
 
 @app.post("/v1/color/analyze", response_model=ColorResponse)
