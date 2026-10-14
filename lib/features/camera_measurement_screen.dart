@@ -10,11 +10,20 @@ import '../services/seamly_api.dart';
 import '../theme/seamly_theme.dart';
 import '../widgets/common.dart';
 import 'guided_scan_screen.dart';
+import 'selfie_scan_screen.dart';
 
-/// Builds the camera step. Tests replace it so no real camera is needed.
+/// Builds the body camera step. Tests replace it so no real camera is needed.
 typedef ScanViewBuilder =
     Widget Function(
       ValueChanged<Map<ScanAngle, ScanShot>> onCompleted,
+      VoidCallback onCancel,
+    );
+
+/// Builds the selfie camera step. Tests replace it so no real camera is needed.
+/// Completes with sampled color frames, never a photo.
+typedef FaceViewBuilder =
+    Widget Function(
+      ValueChanged<List<Map<String, dynamic>>> onCompleted,
       VoidCallback onCancel,
     );
 
@@ -28,12 +37,12 @@ class CameraMeasurementScreen extends StatefulWidget {
     required this.onMeasurementsReady,
     required this.onColorSeasonAnalyzed,
     required this.onOpenShop,
-    this.onOpenFace,
     this.consentStore,
     this.onOpenAccount,
     this.avatarBase64,
     this.extractor,
     this.scanBuilder,
+    this.faceBuilder,
   });
 
   final SeamlyApi api;
@@ -44,9 +53,6 @@ class CameraMeasurementScreen extends StatefulWidget {
   final ValueChanged<String> onColorSeasonAnalyzed;
   final VoidCallback onOpenShop;
 
-  /// Opens the face-colors feature. The option is hidden when null.
-  final VoidCallback? onOpenFace;
-
   /// Remembers the one-time scan consent. Defaults to device preferences.
   final ScanConsentStore? consentStore;
   final VoidCallback? onOpenAccount;
@@ -55,8 +61,11 @@ class CameraMeasurementScreen extends StatefulWidget {
   /// Measures the three photos on the phone. Defaults to the real one.
   final BodyProfileExtractor? extractor;
 
-  /// Replaces the guided camera screen (for tests).
+  /// Replaces the guided body camera screen (for tests).
   final ScanViewBuilder? scanBuilder;
+
+  /// Replaces the selfie camera screen (for tests).
+  final FaceViewBuilder? faceBuilder;
 
   @override
   State<CameraMeasurementScreen> createState() =>
@@ -65,9 +74,12 @@ class CameraMeasurementScreen extends StatefulWidget {
 
 enum _ScanStage { prepare, scanning, review }
 
+enum _ScanKind { body, face }
+
 class _CameraMeasurementScreenState extends State<CameraMeasurementScreen> {
   BodyProfileExtractor? _ownedExtractor;
   _ScanStage _stage = _ScanStage.prepare;
+  _ScanKind _kind = _ScanKind.body;
   Uint8List? _frontPhoto;
   Map<String, dynamic>? _result;
   Map<String, dynamic>? _colorResult;
@@ -134,7 +146,7 @@ class _CameraMeasurementScreenState extends State<CameraMeasurementScreen> {
         content: const SingleChildScrollView(
           child: Text(
             'Body scan: your photos are measured on this phone. Only the measurements are sent to Seamly.\n\n'
-            'Face colors: your selfie is sent for color analysis, processed in memory, and not kept.\n\n'
+            'Face colors: your selfie is read on this phone. Only color numbers are sent, never the photo.\n\n'
             'Results are estimates. Check measurements with a soft tape before buying or altering clothes.',
           ),
         ),
@@ -169,16 +181,16 @@ class _CameraMeasurementScreenState extends State<CameraMeasurementScreen> {
       return;
     }
     if (!await _ensureConsent() || !mounted) return;
-    _beginScan();
+    _beginScan(_ScanKind.body);
   }
 
   Future<void> _chooseFace() async {
     if (!await _ensureConsent() || !mounted) return;
-    widget.onOpenFace?.call();
+    _beginScan(_ScanKind.face);
   }
 
-  void _beginScan() {
-    if (!_hasValidCalibration) {
+  void _beginScan(_ScanKind kind) {
+    if (kind == _ScanKind.body && !_hasValidCalibration) {
       setState(() {
         _error =
             'A verified height is missing from this account. Create or update your profile before scanning.';
@@ -188,6 +200,7 @@ class _CameraMeasurementScreenState extends State<CameraMeasurementScreen> {
     setState(() {
       _scanGeneration++;
       _clearOutcome();
+      _kind = kind;
       _stage = _ScanStage.scanning;
     });
   }
@@ -203,7 +216,7 @@ class _CameraMeasurementScreenState extends State<CameraMeasurementScreen> {
 
   void _retake() {
     if (_busy) return;
-    _beginScan();
+    _beginScan(_kind);
   }
 
   void _reviewInstructions() {
@@ -212,7 +225,12 @@ class _CameraMeasurementScreenState extends State<CameraMeasurementScreen> {
   }
 
   Future<void> _onScanCompleted(Map<ScanAngle, ScanShot> shots) async {
-    if (!mounted || !widget.active || _stage != _ScanStage.scanning) return;
+    if (!mounted ||
+        !widget.active ||
+        _stage != _ScanStage.scanning ||
+        _kind != _ScanKind.body) {
+      return;
+    }
     final height = widget.referenceHeightCm;
     if (height == null) return;
     final generation = _scanGeneration;
@@ -254,24 +272,6 @@ class _CameraMeasurementScreenState extends State<CameraMeasurementScreen> {
       if (reliableFit) {
         widget.onMeasurementsReady(measurements);
       }
-      if (frontBytes == null || !_currentScan(generation)) return;
-      setState(() {
-        _analyzing = false;
-        _analyzingColor = true;
-      });
-      try {
-        // Color analysis uses the front photo, as before.
-        final colorResult = await widget.api.analyzeAppearancePhoto(
-          imageBytes: frontBytes,
-        );
-        if (!_currentScan(generation)) return;
-        setState(() => _colorResult = colorResult);
-        widget.onColorSeasonAnalyzed(colorResult['color_season'] as String);
-      } on ApiException catch (error) {
-        if (_currentScan(generation)) {
-          setState(() => _colorError = error.message);
-        }
-      }
     } on ScanExtractionException catch (error) {
       if (_currentScan(generation)) {
         setState(() => _error = error.message);
@@ -284,6 +284,46 @@ class _CameraMeasurementScreenState extends State<CameraMeasurementScreen> {
       if (_currentScan(generation)) {
         setState(
           () => _error = 'The scan could not be analyzed. Please try again.',
+        );
+      }
+    } finally {
+      if (_currentScan(generation)) {
+        setState(() {
+          _analyzing = false;
+          _analyzingColor = false;
+        });
+      }
+    }
+  }
+
+  Future<void> _onFaceCompleted(List<Map<String, dynamic>> frames) async {
+    if (!mounted ||
+        !widget.active ||
+        _stage != _ScanStage.scanning ||
+        _kind != _ScanKind.face) {
+      return;
+    }
+    final generation = _scanGeneration;
+    setState(() {
+      _clearOutcome();
+      _stage = _ScanStage.review;
+      _analyzingColor = true;
+    });
+    try {
+      // Only sampled color numbers go to the server, never the photos.
+      final colorResult = await widget.api.analyzeColorFrames(frames);
+      if (!_currentScan(generation)) return;
+      setState(() => _colorResult = colorResult);
+      widget.onColorSeasonAnalyzed(colorResult['color_season'] as String);
+    } on ApiException catch (error) {
+      if (_currentScan(generation)) {
+        setState(() => _colorError = error.message);
+      }
+    } on Exception {
+      if (_currentScan(generation)) {
+        setState(
+          () => _colorError =
+              'The color scan could not be analyzed. Please try again.',
         );
       }
     } finally {
@@ -317,10 +357,12 @@ class _CameraMeasurementScreenState extends State<CameraMeasurementScreen> {
                   children: [
                     Row(
                       children: [
-                        const Expanded(
+                        Expanded(
                           child: Text(
-                            'Your scan',
-                            style: TextStyle(
+                            _kind == _ScanKind.face
+                                ? 'Your colors'
+                                : 'Your scan',
+                            style: const TextStyle(
                               fontSize: 24,
                               fontWeight: FontWeight.w700,
                             ),
@@ -381,16 +423,27 @@ class _CameraMeasurementScreenState extends State<CameraMeasurementScreen> {
       },
       child: switch (_stage) {
         _ScanStage.prepare => _buildPrepare(),
-        _ScanStage.scanning =>
-          widget.scanBuilder?.call(_onScanCompleted, _cancelScan) ??
-              GuidedScanScreen(
-                key: ValueKey('guided-scan-$_scanGeneration'),
-                onCompleted: _onScanCompleted,
-                onCancel: _cancelScan,
-              ),
+        _ScanStage.scanning => _buildScanning(),
         _ScanStage.review => _buildReview(),
       },
     );
+  }
+
+  Widget _buildScanning() {
+    if (_kind == _ScanKind.face) {
+      return widget.faceBuilder?.call(_onFaceCompleted, _cancelScan) ??
+          SelfieScanScreen(
+            key: ValueKey('selfie-scan-$_scanGeneration'),
+            onCompleted: _onFaceCompleted,
+            onCancel: _cancelScan,
+          );
+    }
+    return widget.scanBuilder?.call(_onScanCompleted, _cancelScan) ??
+        GuidedScanScreen(
+          key: ValueKey('guided-scan-$_scanGeneration'),
+          onCompleted: _onScanCompleted,
+          onCancel: _cancelScan,
+        );
   }
 
   Widget _buildPrepare() {
@@ -433,17 +486,15 @@ class _CameraMeasurementScreenState extends State<CameraMeasurementScreen> {
                         'Measurements and your size. Three photos, about a minute. Wear fitted clothes and stand 2–3 m away.',
                     onTap: _chooseBody,
                   ),
-                  if (widget.onOpenFace != null) ...[
-                    const SizedBox(height: 14),
-                    _ScanOptionCard(
-                      key: const ValueKey('scan-option-face'),
-                      icon: Icons.face_retouching_natural_rounded,
-                      title: 'Face colors',
-                      subtitle:
-                          'Find the colors that suit you. One selfie in bright, natural light.',
-                      onTap: _chooseFace,
-                    ),
-                  ],
+                  const SizedBox(height: 14),
+                  _ScanOptionCard(
+                    key: const ValueKey('scan-option-face'),
+                    icon: Icons.face_retouching_natural_rounded,
+                    title: 'Face colors',
+                    subtitle:
+                        'Find the colors that suit you. A few seconds in bright, natural light.',
+                    onTap: _chooseFace,
+                  ),
                   const SizedBox(height: 14),
                   const Text(
                     'Results are estimates. Check measurements with a soft tape and the seller’s size chart before buying or altering clothing.',
@@ -465,6 +516,7 @@ class _CameraMeasurementScreenState extends State<CameraMeasurementScreen> {
 
   Widget _buildReview() {
     final hasOutcome = _result != null || _colorResult != null;
+    final isFace = _kind == _ScanKind.face;
     return ColoredBox(
       color: SeamlyColors.cream,
       child: SafeArea(
@@ -484,10 +536,10 @@ class _CameraMeasurementScreenState extends State<CameraMeasurementScreen> {
                         icon: const Icon(Icons.arrow_back),
                       ),
                       const SizedBox(width: 8),
-                      const Expanded(
+                      Expanded(
                         child: Text(
-                          'Body scan',
-                          style: TextStyle(
+                          isFace ? 'Face colors' : 'Body scan',
+                          style: const TextStyle(
                             fontSize: 22,
                             fontWeight: FontWeight.w700,
                           ),
@@ -685,7 +737,7 @@ class _ColorAnalysisUnavailable extends StatelessWidget {
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
                   const Text(
-                    'Color analysis needs another photo',
+                    'Color analysis needs another scan',
                     style: TextStyle(fontWeight: FontWeight.w800),
                   ),
                   const SizedBox(height: 4),
@@ -816,7 +868,7 @@ class _CameraColorResult extends StatelessWidget {
               ),
             const SizedBox(height: 11),
             const Text(
-              'Camera-based color is an estimate, not a guaranteed personal-color diagnosis. For the most reliable result, use bright indirect daylight, no filter, and verify the palette in more than one photo.',
+              'Camera-based color is an estimate, not a guaranteed personal-color diagnosis. For the most reliable result, use bright indirect daylight, no filter, and verify the palette in more than one scan.',
               style: TextStyle(
                 fontSize: 11.5,
                 color: Colors.black54,
