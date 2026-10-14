@@ -473,6 +473,7 @@ class _SeamlyShellState extends State<SeamlyShell> {
         onMeasurementsReady: _saveScanMeasurements,
         onColorSeasonAnalyzed: (value) => setState(() => _colorSeason = value),
         onOpenShop: () => _selectPage(1),
+        onOpenFace: () => _selectPage(6),
         onOpenAccount: _openAccount,
         avatarBase64: widget.account?.avatarBase64,
       ),

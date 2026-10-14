@@ -8,6 +8,7 @@ import 'package:seamly/features/camera_measurement_screen.dart';
 import 'package:seamly/features/guided_scan_screen.dart';
 import 'package:seamly/services/body_profile_extractor.dart';
 import 'package:seamly/services/pose_scan_service.dart';
+import 'package:seamly/services/scan_consent.dart';
 import 'package:seamly/services/seamly_api.dart';
 
 /// A real 1x1 PNG so Image.memory can decode it.
@@ -61,25 +62,72 @@ const _colorResult = <String, dynamic>{
 };
 
 void main() {
-  testWidgets('the camera opens only after both checks are ticked', (
+  testWidgets('Body scan opens the camera at once when consent was given', (
     tester,
   ) async {
     _viewport(tester, const Size(430, 900));
     await tester.pumpWidget(_screen(_ScanApi(), _FakeExtractor()));
-    final start = find.byKey(const ValueKey('start-guided-scan-button'));
-    expect(tester.widget<FilledButton>(start).onPressed, isNull);
+    expect(find.byKey(const ValueKey('scan-option-body')), findsOneWidget);
+    expect(find.byType(Checkbox), findsNothing);
 
-    await _tapKey(tester, 'scan-preparation-checkbox');
-    expect(tester.widget<FilledButton>(start).onPressed, isNull);
-    await _tapKey(tester, 'scan-consent-checkbox');
-    expect(tester.widget<FilledButton>(start).onPressed, isNotNull);
-
-    await _tapKey(tester, 'start-guided-scan-button');
+    await _beginScan(tester);
     expect(find.byKey(const ValueKey('fake-scan-done')), findsOneWidget);
-    expect(find.text('Prepare for your body scan'), findsNothing);
+    expect(find.byKey(const ValueKey('scan-option-body')), findsNothing);
   });
 
-  testWidgets('cancelling the camera returns to the instructions', (
+  testWidgets('the first scan asks for consent once and remembers it', (
+    tester,
+  ) async {
+    _viewport(tester, const Size(430, 900));
+    final consent = MemoryScanConsentStore();
+    await tester.pumpWidget(
+      _screen(_ScanApi(), _FakeExtractor(), consent: consent),
+    );
+    await _tapKey(tester, 'scan-option-body');
+    await tester.pumpAndSettle();
+    expect(find.text('Before your first scan'), findsOneWidget);
+    expect(find.byKey(const ValueKey('fake-scan-done')), findsNothing);
+
+    await tester.tap(find.byKey(const ValueKey('scan-consent-agree')));
+    await tester.pumpAndSettle();
+    expect(find.byKey(const ValueKey('fake-scan-done')), findsOneWidget);
+    expect(await consent.isGranted(), isTrue);
+
+    await tester.tap(find.byKey(const ValueKey('fake-scan-cancel')));
+    await tester.pump();
+    await _tapKey(tester, 'scan-option-body');
+    await tester.pumpAndSettle();
+    expect(find.text('Before your first scan'), findsNothing);
+    expect(find.byKey(const ValueKey('fake-scan-done')), findsOneWidget);
+  });
+
+  testWidgets('declining consent keeps the scan options', (tester) async {
+    _viewport(tester, const Size(430, 900));
+    final consent = MemoryScanConsentStore();
+    await tester.pumpWidget(
+      _screen(_ScanApi(), _FakeExtractor(), consent: consent),
+    );
+    await _tapKey(tester, 'scan-option-body');
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Not now'));
+    await tester.pumpAndSettle();
+    expect(find.byKey(const ValueKey('scan-option-body')), findsOneWidget);
+    expect(find.byKey(const ValueKey('fake-scan-done')), findsNothing);
+    expect(await consent.isGranted(), isFalse);
+  });
+
+  testWidgets('Face colors opens the face feature', (tester) async {
+    _viewport(tester, const Size(430, 900));
+    var opened = 0;
+    await tester.pumpWidget(
+      _screen(_ScanApi(), _FakeExtractor(), onFace: () => opened++),
+    );
+    await _tapKey(tester, 'scan-option-face');
+    await tester.pumpAndSettle();
+    expect(opened, 1);
+  });
+
+  testWidgets('cancelling the camera returns to the scan options', (
     tester,
   ) async {
     _viewport(tester, const Size(430, 900));
@@ -87,7 +135,7 @@ void main() {
     await _beginScan(tester);
     await tester.tap(find.byKey(const ValueKey('fake-scan-cancel')));
     await tester.pump();
-    expect(find.text('Prepare for your body scan'), findsOneWidget);
+    expect(find.byKey(const ValueKey('scan-option-body')), findsOneWidget);
     expect(find.byKey(const ValueKey('fake-scan-done')), findsNothing);
   });
 
@@ -272,15 +320,10 @@ Future<void> _tapKey(WidgetTester tester, String key) async {
   await tester.pump();
 }
 
-/// Ticks both checkboxes and opens the (fake) camera step.
+/// Taps Body scan (consent already given) and opens the (fake) camera step.
 Future<void> _beginScan(WidgetTester tester) async {
-  for (final key in [
-    'scan-preparation-checkbox',
-    'scan-consent-checkbox',
-    'start-guided-scan-button',
-  ]) {
-    await _tapKey(tester, key);
-  }
+  await _tapKey(tester, 'scan-option-body');
+  await tester.pumpAndSettle();
 }
 
 Map<ScanAngle, ScanShot> _shots() => {
@@ -301,6 +344,8 @@ Widget _screen(
   ValueChanged<Map<String, double>>? onMeasurements,
   ValueChanged<String>? onColor,
   double textScale = 1,
+  ScanConsentStore? consent,
+  VoidCallback? onFace,
 }) => MaterialApp(
   builder: (context, child) => MediaQuery(
     data: MediaQuery.of(
@@ -317,6 +362,8 @@ Widget _screen(
       onMeasurementsReady: onMeasurements ?? (_) {},
       onColorSeasonAnalyzed: onColor ?? (_) {},
       onOpenShop: () {},
+      onOpenFace: onFace,
+      consentStore: consent ?? MemoryScanConsentStore(granted: true),
       extractor: extractor,
       scanBuilder: (onCompleted, onCancel) =>
           _FakeScan(onCompleted: onCompleted, onCancel: onCancel),

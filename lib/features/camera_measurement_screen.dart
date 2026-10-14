@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 
 import '../services/body_profile_extractor.dart';
 import '../services/pose_scan_service.dart' show ScanAngle;
+import '../services/scan_consent.dart';
 import '../services/seamly_api.dart';
 import '../theme/seamly_theme.dart';
 import '../widgets/common.dart';
@@ -27,6 +28,8 @@ class CameraMeasurementScreen extends StatefulWidget {
     required this.onMeasurementsReady,
     required this.onColorSeasonAnalyzed,
     required this.onOpenShop,
+    this.onOpenFace,
+    this.consentStore,
     this.onOpenAccount,
     this.avatarBase64,
     this.extractor,
@@ -40,6 +43,12 @@ class CameraMeasurementScreen extends StatefulWidget {
   final ValueChanged<Map<String, double>> onMeasurementsReady;
   final ValueChanged<String> onColorSeasonAnalyzed;
   final VoidCallback onOpenShop;
+
+  /// Opens the face-colors feature. The option is hidden when null.
+  final VoidCallback? onOpenFace;
+
+  /// Remembers the one-time scan consent. Defaults to device preferences.
+  final ScanConsentStore? consentStore;
   final VoidCallback? onOpenAccount;
   final String? avatarBase64;
 
@@ -66,8 +75,8 @@ class _CameraMeasurementScreenState extends State<CameraMeasurementScreen> {
   String? _colorError;
   bool _analyzing = false;
   bool _analyzingColor = false;
-  bool _preparationConfirmed = false;
-  bool _consentConfirmed = false;
+  late final ScanConsentStore _consent =
+      widget.consentStore ?? PreferencesScanConsentStore();
   int _scanGeneration = 0;
 
   bool get _busy => _analyzing || _analyzingColor;
@@ -85,8 +94,6 @@ class _CameraMeasurementScreenState extends State<CameraMeasurementScreen> {
       _scanGeneration++;
       _stage = _ScanStage.prepare;
       _clearOutcome();
-      _preparationConfirmed = false;
-      _consentConfirmed = false;
     }
   }
 
@@ -112,6 +119,64 @@ class _CameraMeasurementScreenState extends State<CameraMeasurementScreen> {
     return height != null && height >= 120 && height <= 230;
   }
 
+  /// Asks for consent only the first time; the answer is remembered.
+  Future<bool> _ensureConsent() async {
+    try {
+      if (await _consent.isGranted()) return true;
+    } on Exception {
+      // If the saved answer cannot be read, ask again.
+    }
+    if (!mounted) return false;
+    final agreed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Before your first scan'),
+        content: const SingleChildScrollView(
+          child: Text(
+            'Body scan: your photos are measured on this phone. Only the measurements are sent to Seamly.\n\n'
+            'Face colors: your selfie is sent for color analysis, processed in memory, and not kept.\n\n'
+            'Results are estimates. Check measurements with a soft tape before buying or altering clothes.',
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('Not now'),
+          ),
+          FilledButton(
+            key: const ValueKey('scan-consent-agree'),
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text('I agree'),
+          ),
+        ],
+      ),
+    );
+    if (agreed != true) return false;
+    try {
+      await _consent.grant();
+    } on Exception {
+      // Continue for this session even if the answer cannot be saved.
+    }
+    return true;
+  }
+
+  Future<void> _chooseBody() async {
+    if (!_hasValidCalibration) {
+      setState(() {
+        _error =
+            'A verified height is missing from this account. Create or update your profile before scanning.';
+      });
+      return;
+    }
+    if (!await _ensureConsent() || !mounted) return;
+    _beginScan();
+  }
+
+  Future<void> _chooseFace() async {
+    if (!await _ensureConsent() || !mounted) return;
+    widget.onOpenFace?.call();
+  }
+
   void _beginScan() {
     if (!_hasValidCalibration) {
       setState(() {
@@ -120,7 +185,6 @@ class _CameraMeasurementScreenState extends State<CameraMeasurementScreen> {
       });
       return;
     }
-    if (!_preparationConfirmed || !_consentConfirmed) return;
     setState(() {
       _scanGeneration++;
       _clearOutcome();
@@ -351,7 +415,7 @@ class _CameraMeasurementScreenState extends State<CameraMeasurementScreen> {
                       const SizedBox(width: 8),
                       const Expanded(
                         child: Text(
-                          'Body scan',
+                          'Scan',
                           style: TextStyle(
                             fontSize: 22,
                             fontWeight: FontWeight.w700,
@@ -361,17 +425,30 @@ class _CameraMeasurementScreenState extends State<CameraMeasurementScreen> {
                     ],
                   ),
                   const SizedBox(height: 12),
-                  _ScanPreparationCard(
-                    referenceHeightCm: widget.referenceHeightCm,
-                    preparationConfirmed: _preparationConfirmed,
-                    consentConfirmed: _consentConfirmed,
-                    onPreparationChanged: (value) =>
-                        setState(() => _preparationConfirmed = value ?? false),
-                    onConsentChanged: (value) =>
-                        setState(() => _consentConfirmed = value ?? false),
-                    onStart: _preparationConfirmed && _consentConfirmed
-                        ? _beginScan
-                        : null,
+                  _ScanOptionCard(
+                    key: const ValueKey('scan-option-body'),
+                    icon: Icons.accessibility_new_rounded,
+                    title: 'Body scan',
+                    subtitle:
+                        'Measurements and your size. Three photos, about a minute. Wear fitted clothes and stand 2–3 m away.',
+                    onTap: _chooseBody,
+                  ),
+                  if (widget.onOpenFace != null) ...[
+                    const SizedBox(height: 14),
+                    _ScanOptionCard(
+                      key: const ValueKey('scan-option-face'),
+                      icon: Icons.face_retouching_natural_rounded,
+                      title: 'Face colors',
+                      subtitle:
+                          'Find the colors that suit you. One selfie in bright, natural light.',
+                      onTap: _chooseFace,
+                    ),
+                  ],
+                  const SizedBox(height: 14),
+                  const Text(
+                    'Results are estimates. Check measurements with a soft tape and the seller’s size chart before buying or altering clothing.',
+                    textAlign: TextAlign.center,
+                    style: TextStyle(fontSize: 11.5, color: Colors.black54),
                   ),
                   if (_error != null) ...[
                     const SizedBox(height: 12),
@@ -468,7 +545,7 @@ class _CameraMeasurementScreenState extends State<CameraMeasurementScreen> {
                     TextButton(
                       key: const ValueKey('review-instructions-button'),
                       onPressed: _reviewInstructions,
-                      child: const Text('Review the instructions'),
+                      child: const Text('Back to scan options'),
                     ),
                   ],
                 ],
@@ -513,197 +590,74 @@ class _ScanProgressCard extends StatelessWidget {
   }
 }
 
-class _ScanPreparationCard extends StatelessWidget {
-  const _ScanPreparationCard({
-    required this.referenceHeightCm,
-    required this.preparationConfirmed,
-    required this.consentConfirmed,
-    required this.onPreparationChanged,
-    required this.onConsentChanged,
-    required this.onStart,
-  });
-
-  final double? referenceHeightCm;
-  final bool preparationConfirmed;
-  final bool consentConfirmed;
-  final ValueChanged<bool?> onPreparationChanged;
-  final ValueChanged<bool?> onConsentChanged;
-  final VoidCallback? onStart;
-
-  bool get _hasValidHeight =>
-      referenceHeightCm != null &&
-      referenceHeightCm! >= 120 &&
-      referenceHeightCm! <= 230;
-
-  @override
-  Widget build(BuildContext context) {
-    return Card(
-      margin: EdgeInsets.zero,
-      child: Padding(
-        padding: const EdgeInsets.fromLTRB(20, 22, 20, 20),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            const Text(
-              'Prepare for your body scan',
-              style: TextStyle(fontSize: 24, fontWeight: FontWeight.w800),
-            ),
-            const SizedBox(height: 7),
-            const Text(
-              'Seamly takes three photos by itself as you turn: front, side, then back. Set up first so it can measure you from a clear full-body view.',
-              style: TextStyle(height: 1.4),
-            ),
-            const SizedBox(height: 20),
-            const _PreparationStep(
-              icon: Icons.light_mode_outlined,
-              title: 'Move to a well-lit area',
-              detail:
-                  'Use bright, even light from the front. Avoid strong shadows and a bright window behind you.',
-            ),
-            const _PreparationStep(
-              icon: Icons.accessibility_new_rounded,
-              title: 'Show your full body',
-              detail:
-                  'Stand straight with your head and feet both inside the guide and your arms slightly away from your sides.',
-            ),
-            const _PreparationStep(
-              icon: Icons.checkroom_outlined,
-              title: 'Wear fitted clothing',
-              detail:
-                  'Avoid loose layers that hide your shoulders, waist, hips, or legs.',
-            ),
-            const _PreparationStep(
-              icon: Icons.phone_iphone_rounded,
-              title: 'Prop up the phone',
-              detail:
-                  'Lean it upright against something steady, about 2–3 metres away, with the back camera facing you and a plain background behind you.',
-            ),
-            const _PreparationStep(
-              icon: Icons.rotate_right_rounded,
-              title: 'Turn when the screen says so',
-              detail:
-                  'Face the camera first. Then turn to your left for the side photo, and turn your back for the last one. Hold still until the guide turns green.',
-            ),
-            const SizedBox(height: 4),
-            Container(
-              padding: const EdgeInsets.all(13),
-              decoration: BoxDecoration(
-                color: SeamlyColors.sand.withValues(alpha: 0.12),
-                borderRadius: BorderRadius.circular(14),
-              ),
-              child: Row(
-                children: [
-                  const Icon(Icons.straighten_rounded),
-                  const SizedBox(width: 10),
-                  Expanded(
-                    child: Text(
-                      _hasValidHeight
-                          ? 'Saved height: ${referenceHeightCm!.toStringAsFixed(0)} cm. This calibrates the measurement estimates.'
-                          : 'Add a verified height to your profile before starting the scan.',
-                      style: const TextStyle(
-                        fontSize: 13,
-                        fontWeight: FontWeight.w600,
-                      ),
-                    ),
-                  ),
-                ],
-              ),
-            ),
-            const SizedBox(height: 12),
-            CheckboxListTile(
-              key: const ValueKey('scan-preparation-checkbox'),
-              value: preparationConfirmed,
-              onChanged: onPreparationChanged,
-              contentPadding: EdgeInsets.zero,
-              controlAffinity: ListTileControlAffinity.leading,
-              title: const Text(
-                'I am in a well-lit area and can fit my full body inside the camera guide.',
-                style: TextStyle(fontSize: 13.5),
-              ),
-            ),
-            CheckboxListTile(
-              key: const ValueKey('scan-consent-checkbox'),
-              value: consentConfirmed,
-              onChanged: onConsentChanged,
-              contentPadding: EdgeInsets.zero,
-              controlAffinity: ListTileControlAffinity.leading,
-              title: const Text(
-                'I consent to measuring my body from photos on this phone. Only the measurements are sent to Seamly. My front photo is also sent for color analysis and is processed in memory, not kept.',
-                style: TextStyle(fontSize: 13.5),
-              ),
-            ),
-            const SizedBox(height: 8),
-            FilledButton.icon(
-              key: const ValueKey('start-guided-scan-button'),
-              onPressed: _hasValidHeight ? onStart : null,
-              icon: const Icon(Icons.photo_camera_rounded),
-              label: const Text('Open camera for body scan'),
-              style: FilledButton.styleFrom(
-                minimumSize: const Size.fromHeight(56),
-              ),
-            ),
-            const SizedBox(height: 10),
-            const Text(
-              'Measurement results are estimates. Check them with a soft tape and the seller’s size chart before buying or altering clothing.',
-              textAlign: TextAlign.center,
-              style: TextStyle(fontSize: 11.5, color: Colors.black54),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-}
-
-class _PreparationStep extends StatelessWidget {
-  const _PreparationStep({
+class _ScanOptionCard extends StatelessWidget {
+  const _ScanOptionCard({
+    super.key,
     required this.icon,
     required this.title,
-    required this.detail,
+    required this.subtitle,
+    required this.onTap,
   });
 
   final IconData icon;
   final String title;
-  final String detail;
+  final String subtitle;
+  final VoidCallback onTap;
 
   @override
   Widget build(BuildContext context) {
-    return Padding(
-      padding: const EdgeInsets.only(bottom: 15),
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Container(
-            width: 42,
-            height: 42,
-            decoration: BoxDecoration(
-              color: SeamlyColors.sand.withValues(alpha: 0.18),
-              borderRadius: BorderRadius.circular(13),
-            ),
-            child: Icon(icon, color: SeamlyColors.sandText),
-          ),
-          const SizedBox(width: 12),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
+    return Semantics(
+      button: true,
+      label: '$title. $subtitle',
+      excludeSemantics: true,
+      child: Card(
+        margin: EdgeInsets.zero,
+        clipBehavior: Clip.antiAlias,
+        child: InkWell(
+          onTap: onTap,
+          child: Padding(
+            padding: const EdgeInsets.all(20),
+            child: Row(
               children: [
-                Text(
-                  title,
-                  style: const TextStyle(fontWeight: FontWeight.w800),
+                Container(
+                  width: 56,
+                  height: 56,
+                  decoration: BoxDecoration(
+                    color: SeamlyColors.sand.withValues(alpha: 0.18),
+                    borderRadius: BorderRadius.circular(16),
+                  ),
+                  child: Icon(icon, color: SeamlyColors.sandText, size: 30),
                 ),
-                const SizedBox(height: 3),
-                Text(
-                  detail,
-                  style: const TextStyle(
-                    fontSize: 13,
-                    height: 1.35,
-                    color: Colors.black54,
+                const SizedBox(width: 16),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        title,
+                        style: const TextStyle(
+                          fontSize: 20,
+                          fontWeight: FontWeight.w800,
+                        ),
+                      ),
+                      const SizedBox(height: 4),
+                      Text(
+                        subtitle,
+                        style: const TextStyle(
+                          fontSize: 13.5,
+                          height: 1.35,
+                          color: Colors.black54,
+                        ),
+                      ),
+                    ],
                   ),
                 ),
+                const SizedBox(width: 8),
+                const Icon(Icons.chevron_right_rounded),
               ],
             ),
           ),
-        ],
+        ),
       ),
     );
   }

@@ -58,8 +58,10 @@ class BodyProfile {
   final List<String> warnings;
 
   static double _r(double v) => (v * 10).roundToDouble() / 10;
+  // The backend rejects widths outside 5-80 cm, so drop implausible reads.
   static Map<String, double> _rounded(Map<String, double> m) => {
-    for (final e in m.entries) e.key: _r(e.value),
+    for (final e in m.entries)
+      if (e.value >= 5 && e.value <= 80) e.key: _r(e.value),
   };
 
   Map<String, dynamic> toJson() => {
@@ -67,8 +69,10 @@ class BodyProfile {
     'front_widths_cm': _rounded(frontWidthsCm),
     'side_depths_cm': _rounded(sideDepthsCm),
     'back_widths_cm': _rounded(backWidthsCm),
-    if (shoulderCm != null) 'shoulder_cm': _r(shoulderCm!),
-    if (hipToAnkleCm != null) 'hip_to_ankle_cm': _r(hipToAnkleCm!),
+    if (shoulderCm != null && shoulderCm! >= 20 && shoulderCm! <= 70)
+      'shoulder_cm': _r(shoulderCm!),
+    if (hipToAnkleCm != null && hipToAnkleCm! >= 30 && hipToAnkleCm! <= 130)
+      'hip_to_ankle_cm': _r(hipToAnkleCm!),
     'warnings': warnings,
   };
 }

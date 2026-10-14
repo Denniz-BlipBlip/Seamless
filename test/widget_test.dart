@@ -470,7 +470,7 @@ void main() {
 
   // The guided camera itself needs a real device; its flow is covered in
   // camera_capture_test.dart with a stand-in camera step.
-  testWidgets('shows scan instructions and unlocks the camera after both checks', (
+  testWidgets('the camera button offers body scan and face colors', (
     tester,
   ) async {
     _useMobileTestViewport(tester);
@@ -490,25 +490,12 @@ void main() {
     await tester.tap(find.byKey(const ValueKey('home-nav-Scan')));
     await tester.pump();
 
-    expect(find.text('Styling your next look…'), findsNothing);
-    expect(find.text('Prepare for your body scan'), findsOneWidget);
-    expect(find.text('Move to a well-lit area'), findsOneWidget);
-    expect(find.text('Show your full body'), findsOneWidget);
-    expect(find.text('Turn when the screen says so'), findsOneWidget);
-    final startButton = find.byKey(const ValueKey('start-guided-scan-button'));
-    expect(tester.widget<FilledButton>(startButton).onPressed, isNull);
-
-    await tester.ensureVisible(
-      find.byKey(const ValueKey('scan-preparation-checkbox')),
-    );
-    await tester.tap(find.byKey(const ValueKey('scan-preparation-checkbox')));
-    await tester.ensureVisible(
-      find.byKey(const ValueKey('scan-consent-checkbox')),
-    );
-    await tester.tap(find.byKey(const ValueKey('scan-consent-checkbox')));
-    await tester.pump();
-
-    expect(tester.widget<FilledButton>(startButton).onPressed, isNotNull);
+    expect(find.byKey(const ValueKey('scan-option-body')), findsOneWidget);
+    expect(find.byKey(const ValueKey('scan-option-face')), findsOneWidget);
+    expect(find.text('Body scan'), findsOneWidget);
+    expect(find.text('Face colors'), findsOneWidget);
+    expect(find.byType(Checkbox), findsNothing);
+    expect(find.text('Prepare for your body scan'), findsNothing);
   });
 }
 
