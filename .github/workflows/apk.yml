@@ -11,9 +11,12 @@ jobs:
           java-version: 17
       - uses: subosito/flutter-action@v2
         with:
-          channel: stable
+          flutter-version: 3.44.2
+      - name: Set minSdk 23 for ML Kit
+        run: |
+          sed -i 's/minSdk = flutter.minSdkVersion/minSdk = 23/; s/minSdkVersion flutter.minSdkVersion/minSdkVersion 23/' android/app/build.gradle.kts android/app/build.gradle 2>/dev/null || true
       - run: flutter pub get
-      - run: flutter build apk --release --dart-define=API_BASE_URL=https://YOUR-API.onrender.com --dart-define=GOOGLE_WEB_CLIENT_ID=YOUR_ID.apps.googleusercontent.com
+      - run: flutter build apk --release --dart-define=API_BASE_URL=https://stylorista-ai-api.onrender.com
       - uses: actions/upload-artifact@v4
         with:
           name: apk
